@@ -1,0 +1,117 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: fleetflow-api-gateway
+  main:
+    banner-mode: off
+
+  # fleetflow-common ships JPA/Flyway for the business services. The gateway is
+  # reactive and owns no data, so those auto-configurations are switched off.
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+
+  cloud:
+    gateway:
+      default-filters:
+        # Strip hop-by-hop headers that must not survive the proxy hop.
+        - RemoveRequestHeader=Cookie
+      httpclient:
+        connect-timeout: 5000
+        response-timeout: 30s
+        pool:
+          max-connections: 200
+      routes:
+        - id: fleetflow-auth-service
+          uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/auth/**
+        - id: fleetflow-customer-service
+          uri: ${CUSTOMER_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/customers/**
+        - id: fleetflow-order-service
+          uri: ${ORDER_SERVICE_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/orders/**
+        - id: fleetflow-warehouse-service
+          uri: ${WAREHOUSE_SERVICE_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/products/**,/api/inventory/**,/api/warehouses/**
+        - id: fleetflow-delivery-service
+          uri: ${DELIVERY_SERVICE_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/drivers/**,/api/vehicles/**,/api/deliveries/**
+        - id: fleetflow-tracking-service
+          uri: ${TRACKING_SERVICE_URL:http://localhost:8086}
+          predicates:
+            - Path=/api/tracking/**
+        - id: fleetflow-notification-service
+          uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8087}
+          predicates:
+            - Path=/api/notifications/**
+
+  jackson:
+    default-property-inclusion: non_null
+
+fleetflow:
+  jwt:
+    secret: ${JWT_SECRET:fleetflow-local-development-secret-key-change-me-0123456789}
+    issuer: ${JWT_ISSUER:fleetflow}
+  gateway:
+    # Paths served without a token. Everything else requires a valid access token.
+    public-paths:
+      - /api/auth/register
+      - /api/auth/login
+      - /api/auth/refresh
+    # Endpoints kept out of token enforcement for probes, docs and health checks.
+    always-open-paths:
+      - /actuator/**
+      - /v3/api-docs/**
+      - /swagger-ui/**
+      - /swagger-ui.html
+      - /fallback/**
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:4173}
+    allowed-methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+    allowed-headers: "*"
+    exposed-headers: "X-Correlation-ID"
+    allow-credentials: true
+    max-age-seconds: 3600
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,gateway
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: FleetFlow API Gateway
+    description: Single entry point for the FleetFlow platform.
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%X{correlationId:-no-correlation-id}] %-42.42logger{39} : %m%n"
+  level:
+    com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}
+    org.springframework.cloud.gateway: INFO

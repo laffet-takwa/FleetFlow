@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage build for any FleetFlow Spring Boot service.
+#
+# Build from the REPOSITORY ROOT so the whole Maven reactor is visible:
+#   docker build -f infrastructure/docker/Dockerfile.backend --build-arg MODULE=order-service -t fleetflow/order-service .
+#
+# The runtime stage ships a JRE, runs as a non-root user, and relies on container
+# memory limits rather than a fixed -Xmx so the same image works in dev and in k8s.
+
+ARG MAVEN_VERSION=3.9.9
+ARG JAVA_VERSION=17
+
+FROM maven:${MAVEN_VERSION}-eclipse-temurin-${JAVA_VERSION} AS build
+
+ARG MODULE
+ENV MAVEN_CONFIG=/root/.m2
+WORKDIR /workspace
+
+# Copy only the descriptors first. This layer is cached until a POM changes, so
+# ordinary source edits never re-download the dependency tree.
+COPY backend/pom.xml                       backend/pom.xml
+COPY backend/common/pom.xml                backend/common/pom.xml
+COPY backend/discovery-server/pom.xml      backend/discovery-server/pom.xml
+COPY backend/api-gateway/pom.xml           backend/api-gateway/pom.xml
+COPY backend/auth-service/pom.xml          backend/auth-service/pom.xml
+COPY backend/customer-service/pom.xml      backend/customer-service/pom.xml
+COPY backend/order-service/pom.xml         backend/order-service/pom.xml
+COPY backend/warehouse-service/pom.xml     backend/warehouse-service/pom.xml
+COPY backend/delivery-service/pom.xml      backend/delivery-service/pom.xml
+COPY backend/tracking-service/pom.xml      backend/tracking-service/pom.xml
+COPY backend/notification-service/pom.xml  backend/notification-service/pom.xml
+
+# fleetflow-common is not published anywhere yet, so its resolution is expected to
+# fail here; every third-party artifact still lands in the cache.
+RUN mvn -B -f backend/pom.xml dependency:go-offline || true
+
+COPY backend backend
+RUN mvn -B -f backend/pom.xml -pl ${MODULE} -am package -DskipTests -Dmaven.test.skip=true \
+    && cp backend/${MODULE}/target/fleetflow-${MODULE}-*.jar /workspace/app.jar
+
+FROM eclipse-temurin:${JAVA_VERSION}-jre-jammy AS runtime
+
+ARG MODULE
+ENV SERVER_PORT=8080 \
+    JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:+UseSerialGC -Djava.security.egd=file:/dev/./urandom -Dfile.encoding=UTF-8"
+
+# curl is used by the compose healthcheck; the base image ships neither curl nor wget.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system fleetflow && useradd --system --gid fleetflow --home /app fleetflow
+WORKDIR /app
+COPY --from=build /workspace/app.jar /app/app.jar
+RUN chown -R fleetflow:fleetflow /app
+USER fleetflow
+
+ENV MODULE=${MODULE}
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

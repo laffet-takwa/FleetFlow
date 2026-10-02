@@ -1,0 +1,10 @@
+http.host: "0.0.0.0"
+pipeline.ecs_compatibility: v8
+pipeline.workers: 2
+pipeline.ordered: true
+
+queue.type: persisted
+queue.max_bytes: 1024mb
+
+# Index rollover: a demo should not fill the disk with a single day's logs.
+config.reload.automatic: true

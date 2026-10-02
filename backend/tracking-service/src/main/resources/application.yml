@@ -1,0 +1,123 @@
+server:
+  port: ${SERVER_PORT:8086}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+
+spring:
+  application:
+    name: fleetflow-tracking-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  main:
+    banner-mode: off
+  mvc:
+    async:
+      # Server-Sent Events streams are long lived; the container default (30s) would cut
+      # every stream. Keep in sync with fleetflow.tracking.sse-timeout, which also sets the
+      # timeout on the SseEmitter itself. Any reverse proxy in front must disable
+      # response buffering for text/event-stream as well.
+      request-timeout: ${TRACKING_SSE_TIMEOUT:PT30M}
+
+  # No relational database here: history lives in MongoDB, latest state in Redis.
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/fleetflow_tracking}
+      auto-index-creation: true
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      timeout: 3000ms
+      connect-timeout: 3000ms
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:fleetflow-tracking-service}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+      missing-topics-fatal: false
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+fleetflow:
+  jwt:
+    secret: ${JWT_SECRET:fleetflow-local-development-secret-key-change-me-0123456789}
+    issuer: ${JWT_ISSUER:fleetflow}
+  api:
+    version: v1
+    description: "Live driver location ingestion, MongoDB history, Redis latest state and SSE fan-out."
+  tracking:
+    # Key template for the Redis entry holding the newest known position.
+    latest-location-key: "delivery:%d:location"
+    latest-location-ttl: ${TRACKING_LOCATION_TTL:PT6H}
+    history-retention-days: ${TRACKING_HISTORY_RETENTION_DAYS:14}
+    sse-timeout: ${TRACKING_SSE_TIMEOUT:PT30M}
+    stale-after-seconds: ${TRACKING_STALE_AFTER_SECONDS:120}
+    max-latitude: 90.0
+    max-longitude: 180.0
+  kafka:
+    topics:
+      delivery-assigned: ${KAFKA_TOPIC_DELIVERY_ASSIGNED:delivery.assigned}
+      delivery-picked-up: ${KAFKA_TOPIC_DELIVERY_PICKED_UP:delivery.picked-up}
+      delivery-started: ${KAFKA_TOPIC_DELIVERY_STARTED:delivery.started}
+      delivery-completed: ${KAFKA_TOPIC_DELIVERY_COMPLETED:delivery.completed}
+      delivery-failed: ${KAFKA_TOPIC_DELIVERY_FAILED:delivery.failed}
+      delivery-cancelled: ${KAFKA_TOPIC_DELIVERY_CANCELLED:delivery.cancelled}
+  seed:
+    enabled: ${SEED_ENABLED:true}
+  # Service-to-service calls use /internal/** and a shared secret; those paths are
+  # intentionally absent from the gateway route table.
+  internal:
+    enabled: true
+    token: ${FLEETFLOW_INTERNAL_TOKEN:fleetflow-local-internal-token}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: FleetFlow Tracking Service
+    description: Real-time driver positions over Redis, MongoDB and Server-Sent Events.
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+    doc-expansion: none
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%X{correlationId:-no-correlation-id}] %-42.42logger{39} : %m%n"
+  level:
+    com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}
+    org.mongodb.driver.cluster: WARN
+    org.apache.kafka.clients.NetworkClient: ERROR
+

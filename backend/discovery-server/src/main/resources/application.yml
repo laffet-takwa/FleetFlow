@@ -1,0 +1,45 @@
+server:
+  port: ${SERVER_PORT:8761}
+  shutdown: graceful
+
+spring:
+  application:
+    name: fleetflow-discovery-server
+  main:
+    banner-mode: off
+
+eureka:
+  instance:
+    hostname: ${EUREKA_HOSTNAME:localhost}
+  client:
+    # Self-registration is pointless for a single node registry.
+    register-with-eureka: false
+    fetch-registry: false
+    service-url:
+      defaultZone: ${EUREKA_DEFAULT_ZONE:http://${eureka.instance.hostname}:${server.port}/eureka/}
+  server:
+    # The MVP calls services by explicit URL; enable this only when you want to
+    # experiment with `lb://` routing.
+    enable-self-preservation: false
+    eviction-interval-timer-in-ms: 15000
+  dashboard:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+info:
+  app:
+    name: FleetFlow Discovery Server
+    description: Optional Eureka registry. Not required for local development.
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%X{correlationId:-no-correlation-id}] %-42.42logger{39} : %m%n"

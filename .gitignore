@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+target/
+build/
+dist/
+*.jar
+*.war
+*.class
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime / local data
+*.pid
+uploads/

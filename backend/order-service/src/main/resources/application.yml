@@ -1,0 +1,135 @@
+server:
+  port: ${SERVER_PORT:8083}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+    include-binding-errors: never
+
+spring:
+  application:
+    name: fleetflow-order-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  main:
+    banner-mode: off
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:fleetflow_order}
+    username: ${DB_USERNAME:fleetflow}
+    password: ${DB_PASSWORD:fleetflow}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: 2
+      connection-timeout: 10000
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: ${JPA_DDL_AUTO:validate}
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
+        format_sql: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration,classpath:com/fleetflow/common/db/migration
+    baseline-on-migrate: true
+    validate-on-migrate: true
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP:fleetflow-order-service}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+      missing-topics-fatal: false
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+      fail-on-empty-beans: false
+
+  threads:
+    virtual:
+      enabled: false
+
+fleetflow:
+  jwt:
+    secret: ${JWT_SECRET:fleetflow-local-development-secret-key-change-me-0123456789}
+    issuer: ${JWT_ISSUER:fleetflow}
+    access-token-ttl: ${JWT_ACCESS_TOKEN_TTL:PT1H}
+  api:
+    version: v1
+    description: "Order capture, pricing and order lifecycle."
+  seed:
+    enabled: ${SEED_ENABLED:true}
+  # Service-to-service calls use /internal/** and a shared secret; those paths are
+  # intentionally absent from the gateway route table.
+  internal:
+    enabled: true
+    token: ${FLEETFLOW_INTERNAL_TOKEN:fleetflow-local-internal-token}
+  services:
+    warehouse:
+      # Synchronous catalogue lookup: the Order Service needs price and product
+      # name at checkout time, which an asynchronous event cannot provide.
+      base-url: ${WAREHOUSE_SERVICE_URL:http://localhost:8084}
+      connect-timeout-ms: 2000
+      read-timeout-ms: 4000
+  kafka:
+    topics:
+      order-created: ${KAFKA_TOPIC_ORDER_CREATED:order.created}
+      inventory-reserved: ${KAFKA_TOPIC_INVENTORY_RESERVED:inventory.reserved}
+      inventory-insufficient: ${KAFKA_TOPIC_INVENTORY_INSUFFICIENT:inventory.insufficient}
+      delivery-assigned: ${KAFKA_TOPIC_DELIVERY_ASSIGNED:delivery.assigned}
+      delivery-started: ${KAFKA_TOPIC_DELIVERY_STARTED:delivery.started}
+      delivery-completed: ${KAFKA_TOPIC_DELIVERY_COMPLETED:delivery.completed}
+      delivery-failed: ${KAFKA_TOPIC_DELIVERY_FAILED:delivery.failed}
+      delivery-cancelled: ${KAFKA_TOPIC_DELIVERY_CANCELLED:delivery.cancelled}
+  pricing:
+    delivery-fee: ${DELIVERY_FEE:8.00}
+    currency: ${CURRENCY:TND}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when-authorized
+      show-components: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: FleetFlow Order Service
+    description: Issues and validates FleetFlow access tokens.
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+    doc-expansion: none
+  api-docs:
+    path: /v3/api-docs
+
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%X{correlationId:-no-correlation-id}] %-42.42logger{39} : %m%n"
+  level:
+    com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}
+    org.apache.kafka.clients.NetworkClient: ERROR
+    org.apache.kafka.clients.admin.AdminClientConfig: ERROR
+

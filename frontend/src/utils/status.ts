@@ -43,6 +43,20 @@ export function toneClasses(tone: StatusTone): string {
   return TONE_CLASS[tone]
 }
 
+const TONE_DOT: Record<StatusTone, string> = {
+  neutral: 'bg-slate-400',
+  info: 'bg-sky-500',
+  progress: 'bg-blue-500',
+  success: 'bg-success',
+  warning: 'bg-warning',
+  danger: 'bg-danger',
+}
+
+/** Filled dot colour for list markers, where a full badge would be too heavy. */
+export function toneDotClass(tone: StatusTone): string {
+  return TONE_DOT[tone]
+}
+
 const ORDER_STATUS: Record<OrderStatus, StatusMeta> = {
   CREATED: { label: 'Created', tone: 'neutral', glyph: '○' },
   CONFIRMED: { label: 'Confirmed', tone: 'info', glyph: '◔' },

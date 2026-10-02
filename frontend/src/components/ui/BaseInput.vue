@@ -77,7 +77,7 @@ const describedBy = computed(() => {
       :aria-describedby="describedBy"
       class="h-10 w-full rounded-control border bg-surface px-3 text-body text-content transition-colors duration-150 placeholder:text-content-subtle focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:cursor-not-allowed disabled:bg-surface-muted dark:bg-[#0F172A] dark:text-[#F8FAFC] dark:placeholder:text-[#64748B] dark:disabled:bg-[#1E293B]"
       :class="error ? 'border-danger focus:border-danger focus:ring-danger/30' : 'border-edge dark:border-[#334155]'"
-      @input="emit('update:modelValue', type === 'number' ? ($event.target as HTMLInputElement).value : ($event.target as HTMLInputElement).value)"
+      @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)"
       @blur="emit('blur', $event)"
     />
 

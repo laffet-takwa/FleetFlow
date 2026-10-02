@@ -1,4 +1,4 @@
-# FleetFlow — full local platform.
+# FleetFlow ? full local platform.
 #
 #   docker compose up --build                 application stack (Postgres, Kafka, Mongo, Redis, 8 services, SPA)
 #   docker compose --profile elk up -d        additionally Elasticsearch, Logstash, Kibana
@@ -8,12 +8,6 @@
 # that looks like a credential is committed.
 
 name: fleetflow
-
-x-service-image: &service-image
-  build:
-    context: .
-    dockerfile: infrastructure/docker/Dockerfile.backend
-  restart: unless-stopped
 
 # Settings every Spring Boot service shares.
 x-service-env: &service-env
@@ -156,8 +150,8 @@ services:
   # ------------------------------------------------------------------- services
 
   auth-service:
-    <<: *service-image
     container_name: fleetflow-auth-service
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -182,8 +176,8 @@ services:
     logging: *local-logging
 
   customer-service:
-    <<: *service-image
     container_name: fleetflow-customer-service
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -208,8 +202,8 @@ services:
     logging: *local-logging
 
   warehouse-service:
-    <<: *service-image
     container_name: fleetflow-warehouse-service
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -235,8 +229,8 @@ services:
     logging: *local-logging
 
   order-service:
-    <<: *service-image
     container_name: fleetflow-order-service
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -262,8 +256,8 @@ services:
     logging: *local-logging
 
   delivery-service:
-    <<: *service-image
     container_name: fleetflow-delivery-service
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -289,8 +283,8 @@ services:
     logging: *local-logging
 
   tracking-service:
-    <<: *service-image
     container_name: fleetflow-tracking-service
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -317,8 +311,8 @@ services:
     logging: *local-logging
 
   notification-service:
-    <<: *service-image
     container_name: fleetflow-notification-service
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -346,8 +340,8 @@ services:
   # --------------------------------------------------------------------- edge
 
   api-gateway:
-    <<: *service-image
     container_name: fleetflow-api-gateway
+    restart: unless-stopped
     build:
       context: .
       dockerfile: infrastructure/docker/Dockerfile.backend
@@ -404,8 +398,8 @@ services:
   # Eureka is off by default: the gateway routes by explicit URL, so a registry would
   # add a moving part without changing behaviour.
   discovery-server:
-    <<: *service-image
     container_name: fleetflow-discovery-server
+    restart: unless-stopped
     profiles: ["discovery"]
     build:
       context: .
@@ -458,11 +452,29 @@ services:
     volumes:
       - ./infrastructure/elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
       - ./infrastructure/elk/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
-      - gelf-relay-data:/usr/share/logstash/data
+      - logstash-data:/usr/share/logstash/data
     ports:
       - "${LOGSTASH_BEATS_PORT:-5044}:5044"
     depends_on:
       elasticsearch: { condition: service_healthy }
+    networks: [fleetflow-net]
+    logging: *local-logging
+
+  # Filebeat reads the Docker log files through the Docker API and forwards them to
+  # Logstash. Docker's own log drivers cannot speak to a Logstash TCP input, so a
+  # shipper like this is what makes `docker compose --profile elk` work end to end.
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.3
+    container_name: fleetflow-filebeat
+    profiles: ["elk"]
+    user: root
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    volumes:
+      - ./infrastructure/elk/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - filebeat-data:/usr/share/filebeat/data
+    depends_on:
+      logstash: { condition: service_started }
     networks: [fleetflow-net]
     logging: *local-logging
 
@@ -492,4 +504,5 @@ volumes:
   redis-data:
   kafka-data:
   elasticsearch-data:
-  gelf-relay-data:
+  logstash-data:
+  filebeat-data:

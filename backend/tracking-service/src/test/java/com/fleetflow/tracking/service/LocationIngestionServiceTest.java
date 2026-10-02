@@ -41,7 +41,10 @@ import com.fleetflow.tracking.sse.SseDeliveryRegistry;
 class LocationIngestionServiceTest {
 
     private static final long DELIVERY_ID = 3L;
-    private static final long DRIVER_ID = 3L;
+    /** Delivery-service driver key: it names a row, not a person, so it must never authorise. */
+    private static final long DRIVER_KEY = 1L;
+    /** The auth-service user id the assigned driver presents as their JWT subject. */
+    private static final long DRIVER_USER_ID = 3L;
     private static final long CUSTOMER_ID = 9L;
     private static final Instant NOW = Instant.parse("2026-10-02T14:00:00Z");
     private static final Instant PREVIOUS_FIX = Instant.parse("2026-10-02T13:58:00Z");
@@ -69,10 +72,10 @@ class LocationIngestionServiceTest {
     void storesAndPublishesAValidPoint() {
         givenActiveDelivery();
 
-        LocationResponse stored = service.ingest(request(36.8065, 10.1815, NEXT_FIX), DRIVER_ID, false);
+        LocationResponse stored = service.ingest(request(36.8065, 10.1815, NEXT_FIX), DRIVER_USER_ID, false);
 
         assertThat(stored.deliveryId()).isEqualTo(DELIVERY_ID);
-        assertThat(stored.driverId()).isEqualTo(DRIVER_ID);
+        assertThat(stored.driverId()).isEqualTo(DRIVER_KEY);
         assertThat(stored.customerId()).isEqualTo(CUSTOMER_ID);
         assertThat(stored.latitude()).isEqualTo(36.8065);
         assertThat(stored.longitude()).isEqualTo(10.1815);
@@ -82,6 +85,7 @@ class LocationIngestionServiceTest {
         ArgumentCaptor<LocationHistory> history = ArgumentCaptor.forClass(LocationHistory.class);
         verify(mongoTemplate).save(history.capture());
         assertThat(history.getValue().getDeliveryId()).isEqualTo(DELIVERY_ID);
+        assertThat(history.getValue().getDriverId()).isEqualTo(DRIVER_KEY);
         assertThat(history.getValue().getRecordedAt()).isEqualTo(NEXT_FIX);
         assertThat(history.getValue().getReceivedAt()).isEqualTo(NOW);
 
@@ -94,7 +98,7 @@ class LocationIngestionServiceTest {
     void advancesTheStateCounters() {
         DeliveryTrackingState state = givenActiveDelivery();
 
-        service.ingest(request(36.8065, 10.1815, NEXT_FIX), DRIVER_ID, false);
+        service.ingest(request(36.8065, 10.1815, NEXT_FIX), DRIVER_USER_ID, false);
 
         assertThat(state.getLocationCount()).isEqualTo(26);
         assertThat(state.getLastLocationAt()).isEqualTo(NEXT_FIX);
@@ -105,7 +109,7 @@ class LocationIngestionServiceTest {
     void rejectsAnImpossibleLatitude() {
         givenActiveDelivery();
 
-        BusinessException rejection = rejectionFor(request(91.0, 10.1815, NEXT_FIX), DRIVER_ID, false);
+        BusinessException rejection = rejectionFor(request(91.0, 10.1815, NEXT_FIX), DRIVER_USER_ID, false);
 
         assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.VALIDATION_FAILED);
         verify(mongoTemplate, never()).save(any(LocationHistory.class));
@@ -117,7 +121,7 @@ class LocationIngestionServiceTest {
     void rejectsAnImpossibleLongitude() {
         givenActiveDelivery();
 
-        BusinessException rejection = rejectionFor(request(36.8065, 181.0, NEXT_FIX), DRIVER_ID, false);
+        BusinessException rejection = rejectionFor(request(36.8065, 181.0, NEXT_FIX), DRIVER_USER_ID, false);
 
         assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.VALIDATION_FAILED);
     }
@@ -127,7 +131,8 @@ class LocationIngestionServiceTest {
     void rejectsAnUnknownDelivery() {
         when(mongoTemplate.findById(DELIVERY_ID, DeliveryTrackingState.class)).thenReturn(null);
 
-        Throwable thrown = catchThrowable(() -> service.ingest(request(36.8065, 10.1815, NEXT_FIX), DRIVER_ID, false));
+        Throwable thrown = catchThrowable(
+                () -> service.ingest(request(36.8065, 10.1815, NEXT_FIX), DRIVER_USER_ID, false));
 
         assertThat(thrown).isInstanceOf(ResourceNotFoundException.class)
                 .hasMessage("Tracked delivery 3 was not found");
@@ -139,7 +144,7 @@ class LocationIngestionServiceTest {
         DeliveryTrackingState state = givenActiveDelivery();
         state.setTrackingEnabled(false);
 
-        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_ID, false);
+        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_USER_ID, false);
 
         assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.CONFLICT);
         assertThat(rejection).hasMessage("Tracking is only available for an active delivery");
@@ -152,7 +157,7 @@ class LocationIngestionServiceTest {
         DeliveryTrackingState state = givenActiveDelivery();
         state.setStatus(DeliveryStatus.DELIVERED);
 
-        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_ID, false);
+        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_USER_ID, false);
 
         assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.CONFLICT);
     }
@@ -162,7 +167,7 @@ class LocationIngestionServiceTest {
     void rejectsAnOutOfOrderPoint() {
         givenActiveDelivery();
 
-        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, PREVIOUS_FIX), DRIVER_ID, false);
+        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, PREVIOUS_FIX), DRIVER_USER_ID, false);
 
         assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.CONFLICT);
         assertThat(rejection).hasMessage("Location update is out of order");
@@ -174,10 +179,46 @@ class LocationIngestionServiceTest {
     void rejectsAnotherDriversPoint() {
         givenActiveDelivery();
 
-        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_ID + 1, false);
+        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_USER_ID + 1, false);
 
         assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN);
         verify(latestLocationStore, never()).put(any());
+    }
+
+    @Test
+    @DisplayName("does not accept the delivery-service driver key as an identity")
+    void rejectsTheDeliveryServiceDriverKey() {
+        givenActiveDelivery();
+
+        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_KEY, false);
+
+        assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN);
+        verify(latestLocationStore, never()).put(any());
+    }
+
+    @Test
+    @DisplayName("refuses every driver while the delivery has no driverUserId yet")
+    void rejectsAnyDriverForAnUnassignedDelivery() {
+        DeliveryTrackingState state = givenActiveDelivery();
+        state.setDriverUserId(null);
+
+        BusinessException rejection = rejectionFor(request(36.8065, 10.1815, NEXT_FIX), DRIVER_USER_ID, false);
+
+        assertThat(rejection.getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN);
+        verify(mongoTemplate, never()).save(any(LocationHistory.class));
+        verify(latestLocationStore, never()).put(any());
+    }
+
+    @Test
+    @DisplayName("still lets operations post for a delivery nobody has been assigned to")
+    void allowsStaffToPostForAnUnassignedDelivery() {
+        DeliveryTrackingState state = givenActiveDelivery();
+        state.setDriverUserId(null);
+
+        LocationResponse stored = service.ingest(request(36.8065, 10.1815, NEXT_FIX), 2L, true);
+
+        assertThat(stored.deliveryId()).isEqualTo(DELIVERY_ID);
+        verify(sseDeliveryRegistry).broadcast(DELIVERY_ID, stored);
     }
 
     @Test
@@ -196,7 +237,8 @@ class LocationIngestionServiceTest {
         state.setDeliveryId(DELIVERY_ID);
         state.setOrderId(3L);
         state.setCustomerId(CUSTOMER_ID);
-        state.setDriverId(DRIVER_ID);
+        state.setDriverId(DRIVER_KEY);
+        state.setDriverUserId(DRIVER_USER_ID);
         state.setDriverName("Yassine Ben Salah");
         state.setStatus(DeliveryStatus.IN_TRANSIT);
         state.setTrackingEnabled(true);

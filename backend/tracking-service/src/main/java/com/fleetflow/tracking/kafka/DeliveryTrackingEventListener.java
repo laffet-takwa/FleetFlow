@@ -65,19 +65,20 @@ public class DeliveryTrackingEventListener {
                     DeliveryTrackingState.class);
             if (state == null) {
                 state = DeliveryTrackingState.assign(payload.deliveryId(), payload.orderId(),
-                        payload.customerId(), payload.driverId(), payload.driverName(), now);
+                        payload.customerId(), payload.driverId(), payload.driverUserId(), payload.driverName(), now);
             } else {
                 state.setOrderId(payload.orderId());
                 state.setCustomerId(payload.customerId());
                 state.setDriverId(payload.driverId());
+                state.setDriverUserId(payload.driverUserId());
                 state.setDriverName(payload.driverName());
                 state.setActivatedAt(state.getActivatedAt() == null ? now : state.getActivatedAt());
             }
             state.setStatus(DeliveryStatus.ASSIGNED);
             state.setTrackingEnabled(true);
             mongoTemplate.save(state);
-            log.info("Tracking activated for delivery {} assigned to driver {} [correlationId={}]",
-                    payload.deliveryId(), payload.driverId(), envelope.correlationId());
+            log.info("Tracking activated for delivery {} assigned to driver {} (user {}) [correlationId={}]",
+                    payload.deliveryId(), payload.driverId(), payload.driverUserId(), envelope.correlationId());
         }
     }
 
@@ -129,7 +130,7 @@ public class DeliveryTrackingEventListener {
                 // The delivery service is the source of truth; if it skipped delivery.assigned
                 // there is nothing sensible to track yet, so create the projection here.
                 state = DeliveryTrackingState.assign(payload.deliveryId(), payload.orderId(), payload.customerId(),
-                        payload.driverId(), null, clock.instant());
+                        payload.driverId(), payload.driverUserId(), null, clock.instant());
             }
             state.setStatus(payload.newStatus());
             state.setTrackingEnabled(true);

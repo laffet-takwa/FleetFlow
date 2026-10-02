@@ -1,0 +1,177 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens live in Tailwind (see tailwind.config.js). This file only carries the
+ * few things Tailwind cannot express: dark-mode surface overrides, base typography and
+ * the two motion primitives.
+ */
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  .dark {
+    color-scheme: dark;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-surface-muted text-content font-sans text-body antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'tnum';
+  }
+
+  .dark body {
+    @apply bg-[#0F172A] text-[#F8FAFC];
+  }
+
+  /* Visible focus on keyboard navigation only: a focus ring that never goes away is
+     noise for pointer users, and no ring at all breaks keyboard users. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary ring-offset-2 ring-offset-white;
+  }
+
+  .dark :focus-visible {
+    @apply ring-offset-[#0F172A];
+  }
+
+  /* Status is never communicated by colour alone; these keep a text label beside it. */
+  [data-status]::before {
+    content: '';
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-edge-strong;
+  }
+
+  .dark ::-webkit-scrollbar-thumb {
+    @apply bg-[#334155];
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* Cards are separated by a 1px border, not by a shadow. */
+  .card {
+    @apply rounded-card border border-edge bg-surface shadow-card dark:border-[#334155] dark:bg-[#111827];
+  }
+
+  .dark .card {
+    @apply border-[#334155] bg-[#111827];
+  }
+
+  .card-body {
+    @apply p-5;
+  }
+
+  .page-title {
+    @apply text-page-title font-semibold tracking-[-0.01em] text-content dark:text-[#F8FAFC];
+  }
+
+  .section-title {
+    @apply text-section-title font-semibold text-content dark:text-[#F8FAFC];
+  }
+
+  .card-title {
+    @apply text-card-title font-semibold text-content dark:text-[#F8FAFC];
+  }
+
+  .muted {
+    @apply text-content-muted dark:text-[#94A3B8];
+  }
+
+  .skeleton {
+    @apply relative overflow-hidden rounded bg-edge dark:bg-[#1E293B];
+  }
+
+  /* Only two motion primitives are used across the whole app: a route fade and a
+     skeleton shimmer. Animating every component is what makes a UI feel cheap. */
+  .page-enter-active,
+  .page-leave-active {
+    transition: opacity 150ms ease, transform 150ms ease;
+  }
+
+  .page-enter-from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  .page-leave-to {
+    opacity: 0;
+  }
+}
+
+@layer utilities {
+  .skeleton::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background-image: linear-gradient(
+      90deg,
+      rgba(148, 163, 184, 0) 0,
+      rgba(148, 163, 184, 0.18) 40%,
+      rgba(148, 163, 184, 0) 80%
+    );
+    animation: fleetflow-shimmer 1.4s infinite;
+  }
+
+  @keyframes fleetflow-shimmer {
+    100% {
+      transform: translateX(100%);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .skeleton::after {
+      animation: none;
+    }
+
+    .page-enter-active,
+    .page-leave-active {
+      transition: none;
+    }
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* Leaflet ships its own light theme; these overrides keep it consistent with the
+   dark mode surface instead of glaring white. */
+.leaflet-container {
+  @apply rounded-card;
+  font-family: inherit;
+}
+
+.dark .leaflet-tile-pane {
+  filter: brightness(0.72) invert(1) contrast(0.9) hue-rotate(180deg) saturate(0.6);
+}
+
+.dark .leaflet-control-zoom a {
+  @apply bg-[#1E293B] text-[#F8FAFC] border-[#334155];
+}
+
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  @apply shadow-raised;
+}

@@ -128,16 +128,20 @@ public class TrackingQueryService {
 
     /**
      * Staff, the owning customer, or the assigned driver. The driver branch compares the
-     * JWT subject to the delivery-service driver id, which the seeded data keeps in one
-     * id space; see the same note on {@code LocationIngestionService}.
+     * JWT subject to {@code driverUserId}, the platform identity; {@code driverId} is the
+     * delivery-service key and identifies nobody. An unassigned delivery has no
+     * {@code driverUserId} and therefore matches no driver at all. See the same note on
+     * {@code LocationIngestionService}.
      */
     void requireViewer(DeliveryTrackingState state) {
         JwtPrincipal principal = SecurityUtils.requirePrincipal();
         if (principal.role() == FleetRole.ADMIN || principal.role() == FleetRole.OPERATIONS) {
             return;
         }
-        if (Objects.equals(principal.userId(), state.getCustomerId())
-                || Objects.equals(principal.userId(), state.getDriverId())) {
+        if (Objects.equals(principal.userId(), state.getCustomerId())) {
+            return;
+        }
+        if (state.getDriverUserId() != null && Objects.equals(principal.userId(), state.getDriverUserId())) {
             return;
         }
         throw new BusinessException(ErrorCode.FORBIDDEN, "You may only track your own deliveries");

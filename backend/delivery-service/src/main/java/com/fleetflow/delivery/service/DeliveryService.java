@@ -2,7 +2,11 @@ package com.fleetflow.delivery.service;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,16 +95,15 @@ public class DeliveryService {
     }
 
     public List<DeliveryResponse> findActive() {
-        return deliveryRepository.findByStatusInOrderByCreatedAtDesc(DeliveryStatus.OPEN).stream()
-                .map(mapper::toResponse)
-                .toList();
+        return toResponses(deliveryRepository.findByStatusInOrderByCreatedAtDesc(DeliveryStatus.OPEN));
     }
 
     public List<DeliveryResponse> findForDriver(Long userId) {
+        // The caller arrives as a platform identity, so the local key is resolved here and
+        // never leaves this service.
         Driver driver = requireDriverByUserId(userId);
-        return deliveryRepository.findByDriverIdOrderByCreatedAtDesc(driver.getId(), PageRequest.of(0, 200)).stream()
-                .map(mapper::toResponse)
-                .toList();
+        return toResponses(deliveryRepository.findByDriverIdOrderByCreatedAtDesc(driver.getId(),
+                PageRequest.of(0, 200)));
     }
 
     public DeliveryResponse get(Long id) {
@@ -238,10 +241,13 @@ public class DeliveryService {
         vehicle.setStatus(VehicleStatus.IN_USE);
 
         String topic = topics.getDeliveryAssigned();
+        // driverId is this service's own key, driverUserId the platform identity consumers
+        // compare against the caller's JWT subject; the two are not interchangeable.
         eventPublisher.publish(topic, String.valueOf(delivery.getOrderId()),
                 EventEnvelope.of(EventTypes.DELIVERY_ASSIGNED, topic,
                         new DeliveryAssignedPayload(delivery.getId(), delivery.getOrderId(), delivery.getCustomerId(),
-                                driverId, driver.getFullName(), vehicleId, vehicle.getRegistrationNumber())));
+                                driverId, driver.getUserId(), driver.getFullName(), vehicleId,
+                                vehicle.getRegistrationNumber())));
 
         log.info("Assigned delivery {} to driver {} with vehicle {} [correlationId={}]", deliveryId, driverId,
                 vehicleId, CorrelationId.getOrCreate());
@@ -258,7 +264,7 @@ public class DeliveryService {
                 : driverRepository.findById(delivery.getDriverId())
                         .orElseThrow(() -> ResourceNotFoundException.of("Driver", delivery.getDriverId()));
         // Reject an unauthorised actor before doing any further work on their behalf.
-        requireActor(delivery, driver, actorUserId, actorRole);
+        requireActor(driver, actorUserId, actorRole);
 
         Vehicle vehicle = delivery.getVehicleId() == null ? null
                 : vehicleRepository.findById(delivery.getVehicleId())
@@ -334,11 +340,9 @@ public class DeliveryService {
 
     // ----------------------------------------------------------------- helpers
 
-    private void requireActor(Delivery delivery, Driver driver, Long actorUserId, FleetRole actorRole) {
+    private void requireActor(Driver driver, Long actorUserId, FleetRole actorRole) {
         if (actorRole == FleetRole.DRIVER) {
-            if (driver == null || !driver.getUserId().equals(actorUserId)) {
-                throw new BusinessException(ErrorCode.FORBIDDEN, "This delivery is not assigned to you");
-            }
+            requireOwnDelivery(driver, actorUserId);
             return;
         }
         if (actorRole != FleetRole.ADMIN && actorRole != FleetRole.OPERATIONS) {
@@ -347,12 +351,20 @@ public class DeliveryService {
     }
 
     private void requireAssignedDriver(Delivery delivery, Long userId) {
-        if (delivery.getDriverId() == null) {
-            throw new BusinessException(ErrorCode.FORBIDDEN, "This delivery is not assigned to you");
-        }
-        Driver driver = driverRepository.findById(delivery.getDriverId())
-                .orElseThrow(() -> ResourceNotFoundException.of("Driver", delivery.getDriverId()));
-        if (!driver.getUserId().equals(userId)) {
+        Driver driver = delivery.getDriverId() == null ? null
+                : driverRepository.findById(delivery.getDriverId())
+                        .orElseThrow(() -> ResourceNotFoundException.of("Driver", delivery.getDriverId()));
+        requireOwnDelivery(driver, userId);
+    }
+
+    /**
+     * The single rule every driver check goes through: a caller may act only as the
+     * driver assigned, and the comparison is against {@code Driver.userId}, the JWT
+     * subject, never against the local {@code Driver.id}. A delivery with no assignment
+     * passes a null driver and can therefore never match.
+     */
+    private static void requireOwnDelivery(Driver driver, Long callerUserId) {
+        if (driver == null || callerUserId == null || !callerUserId.equals(driver.getUserId())) {
             throw new BusinessException(ErrorCode.FORBIDDEN, "This delivery is not assigned to you");
         }
     }
@@ -370,22 +382,26 @@ public class DeliveryService {
             String reason, Instant now) {
 
         String key = String.valueOf(delivery.getOrderId());
-        Long driverId = driver != null ? driver.getId() : delivery.getDriverId();
+        // Both identifiers travel together: the local key for this service's own joins, the
+        // platform identity for "is this the caller?" checks downstream. A delivery that has
+        // no assigned driver yet carries null for both.
+        Long driverId = driver != null ? driver.getId() : null;
+        Long driverUserId = driver != null ? driver.getUserId() : null;
 
         switch (target) {
-            case PICKED_UP -> publishStatusChanged(delivery, driverId, previous, target, reason, key,
+            case PICKED_UP -> publishStatusChanged(delivery, driverId, driverUserId, previous, target, reason, key,
                     topics.getDeliveryPickedUp(), EventTypes.DELIVERY_PICKED_UP);
-            case IN_TRANSIT -> publishStatusChanged(delivery, driverId, previous, target, reason, key,
+            case IN_TRANSIT -> publishStatusChanged(delivery, driverId, driverUserId, previous, target, reason, key,
                     topics.getDeliveryStarted(), EventTypes.DELIVERY_STARTED);
-            case FAILED -> publishStatusChanged(delivery, driverId, previous, target, reason, key,
+            case FAILED -> publishStatusChanged(delivery, driverId, driverUserId, previous, target, reason, key,
                     topics.getDeliveryFailed(), EventTypes.DELIVERY_FAILED);
-            case CANCELLED -> publishStatusChanged(delivery, driverId, previous, target, reason, key,
+            case CANCELLED -> publishStatusChanged(delivery, driverId, driverUserId, previous, target, reason, key,
                     topics.getDeliveryCancelled(), EventTypes.DELIVERY_CANCELLED);
             case DELIVERED -> {
                 String topic = topics.getDeliveryCompleted();
                 eventPublisher.publish(topic, key, EventEnvelope.of(EventTypes.DELIVERY_COMPLETED, topic,
                         new DeliveryCompletedPayload(delivery.getId(), delivery.getOrderId(), delivery.getCustomerId(),
-                                driverId, now, delivery.getProofOfDelivery())));
+                                driverId, driverUserId, now, delivery.getProofOfDelivery())));
             }
             default -> {
                 // ASSIGNED and CREATED carry no notification of their own.
@@ -393,12 +409,12 @@ public class DeliveryService {
         }
     }
 
-    private void publishStatusChanged(Delivery delivery, Long driverId, DeliveryStatus previous, DeliveryStatus target,
-            String reason, String key, String topic, String eventType) {
+    private void publishStatusChanged(Delivery delivery, Long driverId, Long driverUserId,
+            DeliveryStatus previous, DeliveryStatus target, String reason, String key, String topic, String eventType) {
 
         eventPublisher.publish(topic, key, EventEnvelope.of(eventType, topic,
                 new DeliveryStatusChangedPayload(delivery.getId(), delivery.getOrderId(), delivery.getCustomerId(),
-                        driverId, previous.name(), target.name(), reason)));
+                        driverId, driverUserId, previous.name(), target.name(), reason)));
     }
 
     private DeliveryResponse withDriverAndVehicle(Delivery delivery) {
@@ -407,6 +423,29 @@ public class DeliveryService {
         Vehicle vehicle = delivery.getVehicleId() == null ? null : vehicleRepository.findById(delivery.getVehicleId())
                 .orElse(null);
         return mapper.toResponse(delivery, driver, vehicle);
+    }
+
+    /**
+     * Resolves the crew for a whole list with two queries. The rows then carry the driver's
+     * platform identity, so a driver can recognise their own deliveries without a second
+     * call and without ever being handed a local key to compare against.
+     */
+    private List<DeliveryResponse> toResponses(List<Delivery> deliveries) {
+        Map<Long, Driver> drivers = new HashMap<>();
+        driverRepository.findAllById(idsOf(deliveries, Delivery::getDriverId))
+                .forEach(driver -> drivers.put(driver.getId(), driver));
+        Map<Long, Vehicle> vehicles = new HashMap<>();
+        vehicleRepository.findAllById(idsOf(deliveries, Delivery::getVehicleId))
+                .forEach(vehicle -> vehicles.put(vehicle.getId(), vehicle));
+
+        return deliveries.stream()
+                .map(delivery -> mapper.toResponse(delivery,
+                        drivers.get(delivery.getDriverId()), vehicles.get(delivery.getVehicleId())))
+                .toList();
+    }
+
+    private static List<Long> idsOf(List<Delivery> deliveries, Function<Delivery, Long> id) {
+        return deliveries.stream().map(id).filter(Objects::nonNull).distinct().toList();
     }
 
     private Delivery requireDelivery(Long id) {

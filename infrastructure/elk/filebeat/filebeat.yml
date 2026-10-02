@@ -1,0 +1,48 @@
+# FleetFlow log shipping.
+#
+# Filebeat discovers the FleetFlow containers through the Docker API, reads their
+# JSON log files and forwards the entries to Logstash. Spring Boot writes structured
+# JSON to stdout, so each line arrives here already parsed into fields; the
+# correlation id embedded in the logback pattern survives as a normal field and is
+# what makes the ELK demo useful.
+
+filebeat.autodiscover:
+  providers:
+    - type: docker
+      host: unix:///var/run/docker.sock
+      hints.enabled: true
+      templates:
+        - condition:
+            contains:
+              docker.container.labels.com_docker_compose_project: fleetflow
+          config:
+            - type: container
+              containers.ids:
+                - "${data.docker.container.id}"
+              processors:
+                - add_docker_metadata:
+                    host: "unix:///var/run/docker.sock"
+
+processors:
+  - add_host_metadata: ~
+  - add_docker_metadata: ~
+  - drop_event:
+      when:
+        not:
+          equals:
+            docker.container.labels.com_docker_compose_project: fleetflow
+
+output.logstash:
+  hosts: ["logstash:5044"]
+
+# Keep the on-disk registry small; the JSON log files themselves stay in Docker's
+# storage, this only caches discovery hints between restarts.
+filebeat.registry.path: /usr/share/filebeat/data/registry
+
+logging.level: info
+logging.to_files: false
+
+# Do not follow the log files of the observability stack into itself.
+filebeat.modules:
+  module: []
+  enabled: false

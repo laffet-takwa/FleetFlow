@@ -48,7 +48,10 @@ class TrackingHistoryQueryTest {
 
     private static final long DELIVERY_ID = 3L;
     private static final long CUSTOMER_ID = 9L;
-    private static final long DRIVER_ID = 3L;
+    /** Delivery-service driver key: it names a row, not a person, so it must never authorise. */
+    private static final long DRIVER_KEY = 1L;
+    /** The auth-service user id the assigned driver presents as their JWT subject. */
+    private static final long DRIVER_USER_ID = 3L;
     private static final Instant NOW = Instant.parse("2026-10-02T14:00:00Z");
 
     @Mock
@@ -146,9 +149,48 @@ class TrackingHistoryQueryTest {
     @Test
     @DisplayName("lets the assigned driver read the trail")
     void allowsTheAssignedDriver() {
-        authenticateAs(FleetRole.DRIVER, DRIVER_ID);
+        authenticateAs(FleetRole.DRIVER, DRIVER_USER_ID);
         when(mongoTemplate.find(any(Query.class), eq(LocationHistory.class))).thenReturn(List.of(history(1)));
 
+        assertThat(service.history(DELIVERY_ID, 200).count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("does not accept the delivery-service driver key as an identity")
+    void refusesTheDeliveryServiceDriverKey() {
+        authenticateAs(FleetRole.DRIVER, DRIVER_KEY);
+
+        Throwable thrown = catchThrowable(() -> service.history(DELIVERY_ID, 200));
+
+        assertThat(thrown).isInstanceOf(BusinessException.class);
+        assertThat(((BusinessException) thrown).getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN);
+        verify(mongoTemplate, never()).find(any(Query.class), eq(LocationHistory.class));
+    }
+
+    @Test
+    @DisplayName("refuses every driver while the delivery has no driverUserId yet")
+    void refusesAnyDriverForAnUnassignedDelivery() {
+        DeliveryTrackingState state = givenUnassignedDelivery();
+        authenticateAs(FleetRole.DRIVER, DRIVER_USER_ID);
+
+        Throwable thrown = catchThrowable(() -> service.history(DELIVERY_ID, 200));
+
+        assertThat(thrown).isInstanceOf(BusinessException.class);
+        assertThat(((BusinessException) thrown).getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN);
+        assertThat(state.getDriverUserId()).isNull();
+        verify(mongoTemplate, never()).find(any(Query.class), eq(LocationHistory.class));
+    }
+
+    @Test
+    @DisplayName("still lets the owning customer and operations follow an unassigned delivery")
+    void allowsTheOwnerAndStaffForAnUnassignedDelivery() {
+        givenUnassignedDelivery();
+        when(mongoTemplate.find(any(Query.class), eq(LocationHistory.class))).thenReturn(List.of(history(1)));
+
+        authenticateAs(FleetRole.CUSTOMER, CUSTOMER_ID);
+        assertThat(service.history(DELIVERY_ID, 200).count()).isEqualTo(1);
+
+        authenticateAs(FleetRole.OPERATIONS, 2L);
         assertThat(service.history(DELIVERY_ID, 200).count()).isEqualTo(1);
     }
 
@@ -222,6 +264,16 @@ class TrackingHistoryQueryTest {
                 .thenReturn(state(DELIVERY_ID, true, NOW.minusSeconds(30)));
     }
 
+    /** A delivery the delivery-service created but has not handed to a driver yet. */
+    private DeliveryTrackingState givenUnassignedDelivery() {
+        DeliveryTrackingState state = state(DELIVERY_ID, true, NOW.minusSeconds(30));
+        state.setDriverId(null);
+        state.setDriverUserId(null);
+        state.setDriverName(null);
+        when(mongoTemplate.findById(DELIVERY_ID, DeliveryTrackingState.class)).thenReturn(state);
+        return state;
+    }
+
     private void authenticateAs(FleetRole role, Long userId) {
         JwtPrincipal principal = new JwtPrincipal(userId, role.name().toLowerCase() + "@fleetflow.local", role);
         SecurityContextHolder.getContext()
@@ -233,7 +285,8 @@ class TrackingHistoryQueryTest {
         state.setDeliveryId(deliveryId);
         state.setOrderId(deliveryId);
         state.setCustomerId(CUSTOMER_ID);
-        state.setDriverId(DRIVER_ID);
+        state.setDriverId(DRIVER_KEY);
+        state.setDriverUserId(DRIVER_USER_ID);
         state.setDriverName("Yassine Ben Salah");
         state.setStatus(DeliveryStatus.IN_TRANSIT);
         state.setDestination("12 Rue de la LibertÃ©, La Marsa");
@@ -248,7 +301,7 @@ class TrackingHistoryQueryTest {
         LocationHistory history = new LocationHistory();
         history.setId("fix-" + step);
         history.setDeliveryId(DELIVERY_ID);
-        history.setDriverId(DRIVER_ID);
+        history.setDriverId(DRIVER_KEY);
         history.setCustomerId(CUSTOMER_ID);
         history.setLatitude(36.8065);
         history.setLongitude(10.1815);
@@ -260,7 +313,7 @@ class TrackingHistoryQueryTest {
     }
 
     private LocationResponse location() {
-        return new LocationResponse(DELIVERY_ID, DRIVER_ID, CUSTOMER_ID, 36.8065, 10.1815, 42.5, 275.0,
+        return new LocationResponse(DELIVERY_ID, DRIVER_KEY, CUSTOMER_ID, 36.8065, 10.1815, 42.5, 275.0,
                 NOW.minusSeconds(30), NOW.minusSeconds(29));
     }
 }

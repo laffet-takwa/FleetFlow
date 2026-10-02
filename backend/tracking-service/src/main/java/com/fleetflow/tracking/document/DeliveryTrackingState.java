@@ -25,12 +25,17 @@ public class DeliveryTrackingState {
     private Long customerId;
 
     /**
-     * Driver responsible for the delivery, in the delivery-service id space. Seeded demo
-     * data deliberately uses the auth-service driver user ids (3..7) so a driver can post
-     * their own positions; a production deployment that separates the two id spaces must
-     * resolve the mapping before the authorisation check in the ingestion service.
+     * Driver responsible for the delivery, in the delivery-service id space (its own
+     * primary key). Kept for display and debugging only.
      */
     private Long driverId;
+
+    /**
+     * The same driver as a platform identity: the auth-service user id that a driver's JWT
+     * subject carries. This is the only field authorisation may compare against, and it is
+     * null while the delivery is created but not yet assigned.
+     */
+    private Long driverUserId;
 
     private String driverName;
 
@@ -53,12 +58,13 @@ public class DeliveryTrackingState {
     }
 
     public static DeliveryTrackingState assign(Long deliveryId, Long orderId, Long customerId, Long driverId,
-            String driverName, Instant activatedAt) {
+            Long driverUserId, String driverName, Instant activatedAt) {
         DeliveryTrackingState state = new DeliveryTrackingState();
         state.deliveryId = deliveryId;
         state.orderId = orderId;
         state.customerId = customerId;
         state.driverId = driverId;
+        state.driverUserId = driverUserId;
         state.driverName = driverName;
         state.status = DeliveryStatus.ASSIGNED;
         state.trackingEnabled = true;
@@ -96,6 +102,14 @@ public class DeliveryTrackingState {
 
     public void setDriverId(Long driverId) {
         this.driverId = driverId;
+    }
+
+    public Long getDriverUserId() {
+        return driverUserId;
+    }
+
+    public void setDriverUserId(Long driverUserId) {
+        this.driverUserId = driverUserId;
     }
 
     public String getDriverName() {

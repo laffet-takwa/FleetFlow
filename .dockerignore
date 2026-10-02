@@ -1,0 +1,28 @@
+# Keep the build context small: the Docker daemon does not need sources it will
+# rebuild, and copying node_modules in would be both slow and wrong.
+
+.git
+.github
+.gitignore
+.env
+.env.local
+
+# Compiled output
+**/target
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Docs and local infrastructure notes
+docs
+**/*.md
+!README.md
+
+# Editor noise
+.idea
+.vscode
+*.iml
+
+# The compose file and Dockerfiles themselves are not needed inside the image
+docker-compose.yml
+docker-compose.*.yml

@@ -3,6 +3,7 @@ package com.fleetflow.delivery.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -31,6 +32,7 @@ import com.fleetflow.common.event.EventEnvelope;
 import com.fleetflow.common.event.EventTypes;
 import com.fleetflow.common.event.payload.DeliveryAssignedPayload;
 import com.fleetflow.common.event.payload.DeliveryCompletedPayload;
+import com.fleetflow.common.event.payload.DeliveryStatusChangedPayload;
 import com.fleetflow.common.exception.BusinessException;
 import com.fleetflow.common.exception.ErrorCode;
 import com.fleetflow.common.exception.InvalidStateTransitionException;
@@ -56,9 +58,11 @@ import com.fleetflow.delivery.repository.VehicleRepository;
 @DisplayName("DeliveryService")
 class DeliveryServiceTest {
 
+    // Deliberately different values: the local key and the platform identity are separate
+    // id spaces, and a test that used the same number for both could not catch a mix-up.
     private static final long DRIVER_ID = 3L;
-    private static final long DRIVER_USER_ID = 3L;
-    private static final long OTHER_DRIVER_USER_ID = 4L;
+    private static final long DRIVER_USER_ID = 33L;
+    private static final long OTHER_DRIVER_USER_ID = 44L;
     private static final long VEHICLE_ID = 7L;
     private static final long DELIVERY_ID = 12L;
     private static final long ORDER_ID = 42L;
@@ -129,6 +133,7 @@ class DeliveryServiceTest {
         assertThat(payload.deliveryId()).isEqualTo(DELIVERY_ID);
         assertThat(payload.orderId()).isEqualTo(ORDER_ID);
         assertThat(payload.driverId()).isEqualTo(DRIVER_ID);
+        assertThat(payload.driverUserId()).isEqualTo(DRIVER_USER_ID);
         assertThat(payload.driverName()).isEqualTo("Karim Ben Salah");
         assertThat(payload.vehicleRegistration()).isEqualTo("123 تونس 4567");
     }
@@ -222,6 +227,99 @@ class DeliveryServiceTest {
     }
 
     @Test
+    @DisplayName("holding the driver's local key is not the same identity as holding the account")
+    void rejectsCallerWhoseUserIdMerelyMatchesTheLocalKey() {
+        Delivery delivery = delivery(DeliveryStatus.ASSIGNED);
+        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+        when(driverRepository.findById(DRIVER_ID))
+                .thenReturn(Optional.of(driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.ON_DELIVERY)));
+
+        // DRIVER_ID is the caller's JWT subject, which is not the assigned driver's userId.
+        assertThatThrownBy(() -> deliveryService.changeStatus(DELIVERY_ID, "PICKED_UP", null,
+                DRIVER_ID, FleetRole.DRIVER))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN));
+
+        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("a delivery with no driver assigned cannot be moved by a driver")
+    void rejectsDriverOnAnUnassignedDelivery() {
+        Delivery delivery = delivery(DeliveryStatus.CREATED);
+        delivery.setDriverId(null);
+        delivery.setVehicleId(null);
+        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+
+        assertThatThrownBy(() -> deliveryService.changeStatus(DELIVERY_ID, "CANCELLED", null,
+                DRIVER_USER_ID, FleetRole.DRIVER))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN));
+
+        verify(driverRepository, never()).findById(any());
+        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("a lifecycle event carries the driver's platform identity alongside the local key")
+    void statusChangePublishesBothDriverIdentifiers() {
+        Delivery delivery = delivery(DeliveryStatus.ASSIGNED);
+        Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.ON_DELIVERY);
+        givenDelivery(delivery, driver, vehicle(VEHICLE_ID, VehicleStatus.IN_USE));
+
+        deliveryService.changeStatus(DELIVERY_ID, "PICKED_UP", null, DRIVER_USER_ID, FleetRole.DRIVER);
+
+        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
+        assertThat(topicCaptor.getValue()).isEqualTo("delivery.picked-up");
+
+        DeliveryStatusChangedPayload payload =
+                (DeliveryStatusChangedPayload) envelopeCaptor.getValue().payload();
+        assertThat(payload.previousStatus()).isEqualTo("ASSIGNED");
+        assertThat(payload.newStatus()).isEqualTo("PICKED_UP");
+        assertThat(payload.driverId()).isEqualTo(DRIVER_ID);
+        assertThat(payload.driverUserId()).isEqualTo(DRIVER_USER_ID);
+    }
+
+    @Test
+    @DisplayName("a transition before any assignment publishes a null driver identity")
+    void staffCancellationOfAnUnassignedDeliveryPublishesNoDriver() {
+        Delivery delivery = delivery(DeliveryStatus.CREATED);
+        delivery.setDriverId(null);
+        delivery.setVehicleId(null);
+        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+
+        deliveryService.changeStatus(DELIVERY_ID, "CANCELLED", "Customer changed their mind",
+                OTHER_DRIVER_USER_ID, FleetRole.OPERATIONS);
+
+        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
+        assertThat(topicCaptor.getValue()).isEqualTo("delivery.cancelled");
+
+        DeliveryStatusChangedPayload payload =
+                (DeliveryStatusChangedPayload) envelopeCaptor.getValue().payload();
+        assertThat(payload.driverId()).isNull();
+        assertThat(payload.driverUserId()).isNull();
+    }
+
+    @Test
+    @DisplayName("a driver's own list carries the platform identity, so they can key on their rows")
+    void driversOwnListCarriesThePlatformIdentity() {
+        Delivery delivery = delivery(DeliveryStatus.ASSIGNED);
+        Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.ON_DELIVERY);
+        when(driverRepository.findByUserId(DRIVER_USER_ID)).thenReturn(Optional.of(driver));
+        when(deliveryRepository.findByDriverIdOrderByCreatedAtDesc(eq(DRIVER_ID), any()))
+                .thenReturn(List.of(delivery));
+        when(driverRepository.findAllById(anyList())).thenReturn(List.of(driver));
+        when(vehicleRepository.findAllById(anyList())).thenReturn(List.of(vehicle(VEHICLE_ID, VehicleStatus.IN_USE)));
+
+        List<DeliveryResponse> mine = deliveryService.findForDriver(DRIVER_USER_ID);
+
+        assertThat(mine).hasSize(1);
+        assertThat(mine.get(0).driverId()).isEqualTo(DRIVER_ID);
+        assertThat(mine.get(0).driverUserId()).isEqualTo(DRIVER_USER_ID);
+        assertThat(mine.get(0).driverName()).isEqualTo("Karim Ben Salah");
+    }
+
+    @Test
     @DisplayName("completing a delivery frees the driver and the vehicle and publishes delivery.completed")
     void completingFreesResourcesAndPublishes() {
         Delivery delivery = delivery(DeliveryStatus.IN_TRANSIT);
@@ -248,6 +346,7 @@ class DeliveryServiceTest {
         assertThat(payload.deliveryId()).isEqualTo(DELIVERY_ID);
         assertThat(payload.orderId()).isEqualTo(ORDER_ID);
         assertThat(payload.driverId()).isEqualTo(DRIVER_ID);
+        assertThat(payload.driverUserId()).isEqualTo(DRIVER_USER_ID);
         assertThat(payload.completedAt()).isNotNull();
         assertThat(payload.proofOfDelivery()).isEqualTo("Signed by the concierge");
     }

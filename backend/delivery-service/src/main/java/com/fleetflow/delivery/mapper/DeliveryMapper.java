@@ -24,6 +24,7 @@ public class DeliveryMapper {
                 delivery.getOrderId(),
                 delivery.getCustomerId(),
                 driver != null ? driver.getId() : delivery.getDriverId(),
+                driver != null ? driver.getUserId() : null,
                 driver != null ? driver.getFullName() : null,
                 vehicle != null ? vehicle.getId() : delivery.getVehicleId(),
                 vehicle != null ? vehicle.getRegistrationNumber() : null,

@@ -7,13 +7,18 @@ import io.swagger.v3.oas.annotations.media.Schema;
 /**
  * Delivery summary shown on the live map and in the tracking list, with the newest known
  * position already resolved.
+ *
+ * <p>Carries the driver for display only: {@code driverId} is the delivery-service key and
+ * {@code driverName} the label the board shows. The driver's platform identity is
+ * deliberately absent, so a customer-facing payload cannot be used to learn which auth
+ * user drives which delivery.
  */
 @Schema(name = "TrackedDeliveryResponse", description = "A delivery being tracked")
 public record TrackedDeliveryResponse(
         @Schema(example = "3") Long deliveryId,
         @Schema(example = "3") Long orderId,
         @Schema(example = "9") Long customerId,
-        @Schema(example = "3") Long driverId,
+        @Schema(description = "Delivery-service driver key, for display", example = "1") Long driverId,
         @Schema(example = "Yassine Ben Salah") String driverName,
         @Schema(example = "IN_TRANSIT") String status,
         @Schema(example = "12 Rue de la Liberté, La Marsa") String destination,

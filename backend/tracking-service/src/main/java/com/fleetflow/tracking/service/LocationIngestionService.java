@@ -122,16 +122,18 @@ public class LocationIngestionService {
      * Staff may post for any delivery, which is what the operations console needs. A
      * driver may only post for the delivery assigned to them.
      *
-     * <p>{@code state.driverId} is the delivery-service driver id, and this service has no
-     * driver table to translate it, so the comparison is made against the JWT subject
-     * directly. The seeded demo data keeps both in one id space (drivers 3..7); if the
-     * delivery service ever separates them, the translation belongs here.
+     * <p>The comparison is against {@code state.driverUserId}, the auth-service user id a
+     * driver's JWT subject carries. {@code state.driverId} is the delivery-service primary
+     * key and is never an identity here: the two id spaces are unrelated, so matching on it
+     * would either reject every real driver or, worse, admit whichever customer or operator
+     * happens to share that number. An unassigned delivery carries no {@code driverUserId}
+     * at all and must match nobody.
      */
     private void requireAuthorised(DeliveryTrackingState state, Long authenticatedUserId, boolean staffCaller) {
         if (staffCaller) {
             return;
         }
-        if (!Objects.equals(authenticatedUserId, state.getDriverId())) {
+        if (state.getDriverUserId() == null || !Objects.equals(authenticatedUserId, state.getDriverUserId())) {
             throw new BusinessException(ErrorCode.FORBIDDEN, "You may only report positions for your own delivery");
         }
     }

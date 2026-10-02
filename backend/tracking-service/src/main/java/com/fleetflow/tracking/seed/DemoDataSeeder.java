@@ -69,26 +69,27 @@ public class DemoDataSeeder implements ApplicationRunner {
     /**
      * The ten deliveries the delivery-service seed creates, in the same order.
      *
-     * <p>{@code driverUserId} is the auth-service user id of the driver, which is what a
-     * driver's JWT subject carries, and that is what this service compares a position
-     * report against. The delivery-service seeds its own {@code drivers} rows with
-     * generated keys 1..5 while the users behind them are 3..7, and
-     * {@code DeliveryAssignedPayload.driverId} carries the delivery-service key. Until
-     * the two id spaces are reconciled, a state created from an event names a driver id a
-     * driver can never match, and their own position reports come back 403. The seeded rows
-     * below deliberately store the user id so the demo simulation works end to end.
+     * <p>Both driver identifiers are stored, because they live in different id spaces and
+     * neither can be derived from the other here: the delivery-service inserts its
+     * {@code drivers} rows with generated keys 1..5 for the auth users 3..7, and
+     * {@code DeliveryAssignedPayload} carries the key in {@code driverId} and the auth user
+     * id in {@code driverUserId}. {@code driverKey} therefore reproduces what
+     * {@code deliveries.driver_id} holds, and {@code driverUserId} what a driver of that
+     * delivery presents as their JWT subject, which is the value the authorisation checks
+     * compare. Delivery 10 is created without a driver in the delivery-service seed, so it
+     * has neither.
      */
     private static final List<SeededDelivery> DELIVERIES = List.of(
-            new SeededDelivery(1L, 1L, 8L, 3L, "Karim Ben Salah", DeliveryStatus.DELIVERED),
-            new SeededDelivery(2L, 2L, 9L, 3L, "Karim Ben Salah", DeliveryStatus.DELIVERED),
-            new SeededDelivery(3L, 3L, 10L, 4L, "Yassine Trabelsi", DeliveryStatus.DELIVERED),
-            new SeededDelivery(4L, 4L, 11L, 4L, "Yassine Trabelsi", DeliveryStatus.DELIVERED),
-            new SeededDelivery(5L, 5L, 12L, 5L, "Sami Bouazizi", DeliveryStatus.DELIVERED),
-            new SeededDelivery(6L, 6L, 13L, 7L, "Amine Guesmi", DeliveryStatus.IN_TRANSIT),
-            new SeededDelivery(7L, 7L, 14L, 6L, "Nabil Hammami", DeliveryStatus.IN_TRANSIT),
-            new SeededDelivery(8L, 8L, 15L, 3L, "Karim Ben Salah", DeliveryStatus.ASSIGNED),
-            new SeededDelivery(9L, 9L, 16L, 4L, "Yassine Trabelsi", DeliveryStatus.PICKED_UP),
-            new SeededDelivery(10L, 10L, 17L, null, null, DeliveryStatus.CREATED));
+            new SeededDelivery(1L, 1L, 8L, 1L, 3L, "Karim Ben Salah", DeliveryStatus.DELIVERED),
+            new SeededDelivery(2L, 2L, 9L, 1L, 3L, "Karim Ben Salah", DeliveryStatus.DELIVERED),
+            new SeededDelivery(3L, 3L, 10L, 2L, 4L, "Yassine Trabelsi", DeliveryStatus.DELIVERED),
+            new SeededDelivery(4L, 4L, 11L, 3L, 5L, "Sami Bouazizi", DeliveryStatus.DELIVERED),
+            new SeededDelivery(5L, 5L, 12L, 4L, 6L, "Nabil Hammami", DeliveryStatus.DELIVERED),
+            new SeededDelivery(6L, 6L, 13L, 5L, 7L, "Amine Guesmi", DeliveryStatus.IN_TRANSIT),
+            new SeededDelivery(7L, 7L, 14L, 4L, 6L, "Nabil Hammami", DeliveryStatus.IN_TRANSIT),
+            new SeededDelivery(8L, 8L, 15L, 1L, 3L, "Karim Ben Salah", DeliveryStatus.ASSIGNED),
+            new SeededDelivery(9L, 9L, 16L, 2L, 4L, "Yassine Trabelsi", DeliveryStatus.PICKED_UP),
+            new SeededDelivery(10L, 10L, 17L, null, null, null, DeliveryStatus.CREATED));
 
     private final MongoTemplate mongoTemplate;
     private final LatestLocationStore latestLocationStore;
@@ -141,7 +142,8 @@ public class DemoDataSeeder implements ApplicationRunner {
         state.setDeliveryId(delivery.deliveryId());
         state.setOrderId(delivery.orderId());
         state.setCustomerId(delivery.customerId());
-        state.setDriverId(delivery.driverUserId());
+        state.setDriverId(delivery.driverKey());
+        state.setDriverUserId(delivery.driverUserId());
         state.setDriverName(delivery.driverName());
         state.setStatus(delivery.status());
         state.setDestination(destinationOf(delivery.orderId()));
@@ -220,7 +222,7 @@ public class DemoDataSeeder implements ApplicationRunner {
         return Math.round(value * 1_000_000d) / 1_000_000d;
     }
 
-    private record SeededDelivery(long deliveryId, long orderId, long customerId, Long driverUserId, String driverName,
-            String status) {
+    private record SeededDelivery(long deliveryId, long orderId, long customerId, Long driverKey, Long driverUserId,
+            String driverName, String status) {
     }
 }

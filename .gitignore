@@ -1,36 +1,44 @@
-# Dependencies
-node_modules/
-
-# Build output
+# ---- build output -----------------------------------------------------------
 target/
-build/
 dist/
+build/
+*.class
 *.jar
 *.war
-*.class
 
-# Logs
-*.log
+# ---- Maven ------------------------------------------------------------------
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# ---- Node -------------------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
 npm-debug.log*
 yarn-error.log*
+.pnpm-debug.log*
 
-# Environment / secrets
-.env
-.env.*
-!.env.example
-
-# IDE
+# ---- IDE --------------------------------------------------------------------
 .idea/
-.vscode/
 *.iml
+*.ipr
+*.iws
+.vscode/
+!.vscode/extensions.json
 .settings/
 .project
 .classpath
 
-# OS
+# ---- OS ---------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Runtime / local data
-*.pid
-uploads/
+# ---- secrets ----------------------------------------------------------------
+# .env holds local credentials; only the documented defaults are committed.
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!**/src/**/resources/*.public.pem

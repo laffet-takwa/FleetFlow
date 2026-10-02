@@ -4,7 +4,7 @@ import { defineStore } from 'pinia'
 import { inventoryApi, warehouseApi } from '@/services/inventoryApi'
 import { ApiError } from '@/services/api'
 import { useToastStore } from './toastStore'
-import type { InventoryQuery, InventoryResponse, StockStatus, WarehouseResponse } from '@/types'
+import type { InventoryResponse, StockStatus, WarehouseResponse } from '@/types'
 
 const PAGE_SIZE = 20
 
@@ -20,12 +20,20 @@ export const useInventoryStore = defineStore('inventory', () => {
   const totalElements = ref(0)
   const totalPages = ref(0)
 
-  const query = reactive<Required<Pick<InventoryQuery, 'page' | 'size' | 'warehouseId' | 'search' | 'stockStatus' | 'category'>>>({
+  /** Optional filters are typed explicitly; "no filter" means `undefined`. */
+  const query = reactive<{
+    page: number
+    size: number
+    warehouseId?: number
+    search: string
+    stockStatus: StockStatus | ''
+    category: string
+  }>({
     page: 0,
     size: PAGE_SIZE,
-    warehouseId: undefined as number | undefined,
+    warehouseId: undefined,
     search: '',
-    stockStatus: '' as StockStatus | '',
+    stockStatus: '',
     category: '',
   })
 

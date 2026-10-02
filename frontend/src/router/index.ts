@@ -20,12 +20,6 @@ declare module 'vue-router' {
   }
 }
 
-declare module 'pinia' {
-  interface PiniaCustomProperties {
-    // Reserved for store-aware navigation guards if they are ever needed.
-  }
-}
-
 const routes: RouteRecordRaw[] = [
   {
     path: '/login',
@@ -203,8 +197,10 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/notifications',
     name: 'notifications',
-    component: () => import('@/views/shared/NotificationsView.vue'),
-    meta: { layout: 'admin', title: 'Notifications', breadcrumb: ['Notifications'] },
+    // Wrapped rather than nested: the router resolves layouts through nesting, and
+    // this route must render inside whichever shell the caller's role uses.
+    component: () => import('@/views/shared/NotificationsShell.vue'),
+    meta: { title: 'Notifications', breadcrumb: ['Notifications'] },
   },
   {
     path: '/403',
@@ -223,7 +219,7 @@ const routes: RouteRecordRaw[] = [
 export const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes,
-  scrollBehavior: (to, from, saved) => saved ?? { top: 0 },
+  scrollBehavior: (_to, _from, saved) => saved ?? { top: 0 },
 })
 
 /** Where a user lands after signing in, based on their role. */

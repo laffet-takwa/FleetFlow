@@ -1,5 +1,3 @@
-import { ref } from 'vue'
-
 export type ToastTone = 'success' | 'danger' | 'warning' | 'info'
 
 export interface Toast {

@@ -82,10 +82,10 @@ watch(
 <template>
   <Teleport to="body">
     <Transition
-      enter-active-class="transition-opacity duration-150"
-      enter-from-class="opacity-0"
-      leave-active-class="transition-opacity duration-150"
-      leave-to-class="opacity-0"
+      enterActiveClass="transition-opacity duration-150"
+      enterFromClass="opacity-0"
+      leaveActiveClass="transition-opacity duration-150"
+      leaveToClass="opacity-0"
     >
       <div
         v-if="open"

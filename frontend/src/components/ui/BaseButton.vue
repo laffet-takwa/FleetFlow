@@ -82,7 +82,7 @@ const iconSize = computed(() => (props.size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4'
       <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" opacity="0.25" />
       <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
     </svg>
-    <slot v-else name="icon" :icon-class="iconSize" />
+    <slot v-else name="icon" :iconClass="iconSize" />
     <span>{{ loading ? loadingLabel : '' }}<slot v-if="!loading" /></span>
   </button>
 </template>

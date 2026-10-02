@@ -70,6 +70,24 @@ fleetflow:
     description: "Product catalog, warehouses and inventory reservation."
   seed:
     enabled: ${SEED_ENABLED:true}
+  # Service-to-service calls use /internal/** and a shared secret; those paths are
+  # intentionally absent from the gateway route table.
+  internal:
+    enabled: true
+    token: ${FLEETFLOW_INTERNAL_TOKEN:fleetflow-local-internal-token}
+  services:
+    order:
+      # The order.created payload carries no line detail, so the reservation has to read
+      # the ordered quantities back synchronously over /internal/**.
+      base-url: ${ORDER_SERVICE_URL:http://localhost:8083}
+  kafka:
+    topics:
+      order-created: ${KAFKA_TOPIC_ORDER_CREATED:order.created}
+      inventory-reserved: ${KAFKA_TOPIC_INVENTORY_RESERVED:inventory.reserved}
+      inventory-insufficient: ${KAFKA_TOPIC_INVENTORY_INSUFFICIENT:inventory.insufficient}
+  reservation:
+    # A single warehouse fulfils the MVP; more warehouses would be selected by zone.
+    preferred-warehouse-id: ${PREFERRED_WAREHOUSE_ID:1}
 
 management:
   endpoints:
@@ -106,21 +124,4 @@ logging:
   level:
     com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}
     org.apache.kafka.clients.NetworkClient: ERROR
-    org.apache.kafka.clients.admin.AdminClientConfig: ERROR
-# ---- warehouse-service specific ---------------------------------------------
-fleetflow:
-  kafka:
-    topics:
-      order-created: ${KAFKA_TOPIC_ORDER_CREATED:order.created}
-      inventory-reserved: ${KAFKA_TOPIC_INVENTORY_RESERVED:inventory.reserved}
-      inventory-insufficient: ${KAFKA_TOPIC_INVENTORY_INSUFFICIENT:inventory.insufficient}
-  reservation:
-    # A single warehouse fulfils the MVP; more warehouses would be selected by zone.
-    preferred-warehouse-id: ${PREFERRED_WAREHOUSE_ID:1}
-
-# Service-to-service calls use /internal/** and a shared secret; those paths are
-# intentionally absent from the gateway route table.
-fleetflow:
-  internal:
-    enabled: true
-    token: ${FLEETFLOW_INTERNAL_TOKEN:fleetflow-local-internal-token}
+org.apache.kafka.clients.admin.AdminClientConfig: ERROR

@@ -1,0 +1,48 @@
+---
+# ---------------------------------------------------------------------------
+# Public entry point.
+#
+# Only the gateway is exposed. The business services keep their own ClusterIP
+# Services and have no Ingress, so nothing can reach them from outside the
+# cluster except by going through the gateway's token verification.
+#
+# The SSE annotations matter: without them an ingress proxy buffers the
+# tracking and notification streams, and live updates arrive in one lump when
+# the connection closes instead of as they happen.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fleetflow-ingress
+  namespace: fleetflow
+  labels:
+    app.kubernetes.io/part-of: fleetflow
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/enable-cors: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: fleetflow.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  name: http
+          - path: /actuator
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  name: http
+  # TLS would be added here with a cert-manager annotated `tls:` block. The
+  # project does not ship a certificate, and a self-signed one committed to the
+  # repository teaches the wrong habit.

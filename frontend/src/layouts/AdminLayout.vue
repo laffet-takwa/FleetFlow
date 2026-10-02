@@ -76,14 +76,14 @@ watch(
     <aside
       class="hidden w-60 shrink-0 border-r border-edge bg-surface lg:flex lg:flex-col dark:border-[#334155] dark:bg-[#0B1220]"
     >
-      <AppSidebar :items="navItems" :active-deliveries="delivery.activeDeliveries.length" />
+      <AppSidebar :items="navItems" :activeDeliveries="delivery.activeDeliveries.length" />
     </aside>
 
     <Transition
-      enter-active-class="transition-opacity duration-150"
-      enter-from-class="opacity-0"
-      leave-active-class="transition-opacity duration-150"
-      leave-to-class="opacity-0"
+      enterActiveClass="transition-opacity duration-150"
+      enterFromClass="opacity-0"
+      leaveActiveClass="transition-opacity duration-150"
+      leaveToClass="opacity-0"
     >
       <div
         v-if="drawerOpen"
@@ -93,10 +93,10 @@ watch(
     </Transition>
 
     <Transition
-      enter-active-class="transition-transform duration-150"
-      enter-from-class="-translate-x-full"
-      leave-active-class="transition-transform duration-150"
-      leave-to-class="-translate-x-full"
+      enterActiveClass="transition-transform duration-150"
+      enterFromClass="-translate-x-full"
+      leaveActiveClass="transition-transform duration-150"
+      leaveToClass="-translate-x-full"
     >
       <aside
         v-if="drawerOpen"
@@ -117,7 +117,7 @@ watch(
             </svg>
           </button>
         </div>
-        <AppSidebar :items="navItems" :active-deliveries="delivery.activeDeliveries.length" />
+        <AppSidebar :items="navItems" :activeDeliveries="delivery.activeDeliveries.length" />
       </aside>
     </Transition>
 

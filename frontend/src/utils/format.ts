@@ -78,13 +78,6 @@ export function formatRelative(value: string | null | undefined): string {
     return 'just now'
   }
 
-  const units: [number, Intl.RelativeTimeFormatUnit][] = [
-    [60, 'second'],
-    [3600, 'minute'],
-    [86400, 'hour'],
-    [604800, 'day'],
-  ]
-
   const formatter = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
   if (seconds < 3600) {
     return formatter.format(-Math.round(seconds / 60), 'minute')

@@ -11,7 +11,7 @@ import ErrorState from './ErrorState.vue'
  * Columns are declared as data and each cell is a slot, so a table never grows its own
  * bespoke styling.
  */
-export interface Column<Row> {
+export interface Column {
   key: string
   label: string
   /** Tailwind width class for the cell, e.g. `w-40`. */
@@ -22,7 +22,7 @@ export interface Column<Row> {
 
 const props = withDefaults(
   defineProps<{
-    columns: Column<T>[]
+    columns: Column[]
     rows: T[]
     rowKey: keyof T | ((row: T) => string | number)
     loading?: boolean
@@ -54,7 +54,7 @@ function keyFor(row: T): string | number {
   return typeof rowKey === 'function' ? rowKey(row) : (row[rowKey] as string | number)
 }
 
-function alignClass(align: Column<T>['align']): string {
+function alignClass(align: Column['align']): string {
   return align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'
 }
 
@@ -71,7 +71,7 @@ function onRowKeydown(event: KeyboardEvent, row: T): void {
     <ErrorState
       v-if="error"
       :message="error"
-      retry-label="Try again"
+      retryLabel="Try again"
       @retry="emit('retry')"
     />
 
@@ -81,7 +81,7 @@ function onRowKeydown(event: KeyboardEvent, row: T): void {
       v-else-if="rows.length === 0"
       :title="emptyTitle"
       :description="emptyDescription"
-      :action-label="emptyActionLabel"
+      :actionLabel="emptyActionLabel"
       :icon="emptyIcon"
       @action="emit('emptyAction')"
     />

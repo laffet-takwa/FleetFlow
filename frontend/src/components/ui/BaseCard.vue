@@ -8,7 +8,7 @@ withDefaults(
     title?: string
     subtitle?: string
     padded?: boolean
-    as?: 'section' | 'article' | 'div'
+    as?: 'section' | 'article' | 'aside' | 'div'
   }>(),
   { padded: true, as: 'section' },
 )

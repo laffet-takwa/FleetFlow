@@ -1,0 +1,59 @@
+# Single entry point for `kubectl apply -k infrastructure/kubernetes`.
+#
+# Order is explicit because the namespace must exist before anything is created
+# inside it, and the Secret must exist before a Deployment references it in
+# `envFrom`. Kubernetes has no ordering between files, so this is the one place
+# the sequence is stated.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fleetflow
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+
+  # Datastores and the event bus first: every service refuses to become ready
+  # without them, so applying in this order surfaces a real failure rather than
+  # a CrashLoopBackOff caused by ordering.
+  - postgres.yaml
+  - kafka/kafka.yaml
+  - redis/redis.yaml
+  - mongodb/mongodb.yaml
+
+  # Business services before the gateway: the gateway's readiness depends on
+  # all of them, so applying it last means its own probes settle meaningfully.
+  - auth/auth-service.yaml
+  - customer/customer-service.yaml
+  - order/order-service.yaml
+  - warehouse/warehouse-service.yaml
+  - delivery/delivery-service.yaml
+  - tracking/tracking-service.yaml
+  - notification/notification-service.yaml
+  - gateway/api-gateway.yaml
+
+  - ingress.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: fleetflow
+  app.kubernetes.io/version: 1.0.0
+
+images:
+  - name: fleetflow/api-gateway
+    newTag: 1.0.0
+  - name: fleetflow/auth-service
+    newTag: 1.0.0
+  - name: fleetflow/customer-service
+    newTag: 1.0.0
+  - name: fleetflow/order-service
+    newTag: 1.0.0
+  - name: fleetflow/warehouse-service
+    newTag: 1.0.0
+  - name: fleetflow/delivery-service
+    newTag: 1.0.0
+  - name: fleetflow/tracking-service
+    newTag: 1.0.0
+  - name: fleetflow/notification-service
+    newTag: 1.0.0

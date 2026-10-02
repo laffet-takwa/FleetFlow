@@ -1,0 +1,153 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'infrastructure/docker/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'infrastructure/docker/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MAVEN_VERSION: '3.9.9'
+  JAVA_VERSION: '17'
+
+jobs:
+  verify:
+    name: Compile & unit test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Cache Maven artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('backend/**/pom.xml', 'backend/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: Verify the reactor resolves and every module compiles
+        run: mvn -B -f backend/pom.xml -DskipTests verify
+
+      # Integration tests are tagged, so they can be skipped here and run on a
+      # runner that can actually start containers.
+      - name: Unit tests
+        run: mvn -B -f backend/pom.xml test -DexcludedGroups=integration
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: backend/**/target/surefire-reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  integration:
+    name: Integration tests (Testcontainers)
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Run integration tests
+        run: mvn -B -f backend/pom.xml test -Dgroups=integration -DfailIfNoTests=false
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-integration-reports
+          path: backend/**/target/surefire-reports/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  docker:
+    name: Image · ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - api-gateway
+          - auth-service
+          - customer-service
+          - order-service
+          - warehouse-service
+          - delivery-service
+          - tracking-service
+          - notification-service
+          - discovery-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and load the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.backend
+          build-args: |
+            MODULE=${{ matrix.module }}
+          tags: fleetflow/${{ matrix.module }}:ci
+          load: true
+          cache-from: type=gha,scope=${{ matrix.module }}
+          cache-to: type=gha,scope=${{ matrix.module }},mode=max
+
+      # The image runs as a non-root user with a read-only root filesystem; if the
+      # build produced something else, the platform's own security context would
+      # reject it in Kubernetes, so catching it here is cheaper.
+      - name: Check the image runs as a non-root user
+        run: |
+          user="$(docker inspect --format '{{.Config.User}}' fleetflow/${{ matrix.module }}:ci)"
+          if [ -z "$user" ] || [ "$user" = "0" ] || [ "$user" = "root" ]; then
+            echo "::error::image is configured to run as '$user'"
+            exit 1
+          fi
+          echo "image runs as '$user'"
+
+  compose:
+    name: Compose config is valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy the documented defaults
+        run: cp .env.example .env
+
+      - name: Validate docker-compose.yml for every profile
+        run: |
+          docker compose config --quiet
+          docker compose --profile elk config --quiet
+          docker compose --profile discovery config --quiet

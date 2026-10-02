@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import BaseButton from './BaseButton.vue'
 import { useToastStore } from '@/stores/toastStore'
 
 /**
@@ -20,10 +19,10 @@ const toasts = useToastStore()
       aria-label="Notifications"
     >
       <TransitionGroup
-        enter-active-class="transition duration-150 ease-out"
-        enter-from-class="translate-y-2 opacity-0"
-        leave-active-class="transition duration-150 ease-in"
-        leave-to-class="translate-y-1 opacity-0"
+        enterActiveClass="transition duration-150 ease-out"
+        enterFromClass="translate-y-2 opacity-0"
+        leaveActiveClass="transition duration-150 ease-in"
+        leaveToClass="translate-y-1 opacity-0"
       >
         <div
           v-for="toast in toasts.toasts"

@@ -5,7 +5,6 @@ import { deliveryApi, driverApi, vehicleApi } from '@/services/deliveryApi'
 import { ApiError } from '@/services/api'
 import { useToastStore } from './toastStore'
 import type {
-  DeliveryQuery,
   DeliveryResponse,
   DeliveryStatus,
   DriverQuery,
@@ -31,12 +30,23 @@ export const useDeliveryStore = defineStore('delivery', () => {
   const totalElements = ref(0)
   const totalPages = ref(0)
 
-  const query = reactive<
-    Required<Pick<DeliveryQuery, 'page' | 'size' | 'status' | 'driverId' | 'vehicleId' | 'from' | 'to'>>
-  >({
+  /**
+   * Filters are declared with an explicit shape rather than `Required<Pick<…>>`:
+   * several of them are legitimately optional, and `Required` would force `undefined`
+   * where "no filter" is the real intent.
+   */
+  const query = reactive<{
+    page: number
+    size: number
+    status: DeliveryStatus | ''
+    driverId?: number
+    vehicleId?: number
+    from: string
+    to: string
+  }>({
     page: 0,
     size: PAGE_SIZE,
-    status: '' as DeliveryStatus | '',
+    status: '',
     driverId: undefined,
     vehicleId: undefined,
     from: '',

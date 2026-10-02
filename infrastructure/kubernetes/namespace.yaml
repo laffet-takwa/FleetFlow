@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fleetflow
+  labels:
+    app.kubernetes.io/part-of: fleetflow
+    # Resource quotas and Pod Security Admission keep a demo namespace from
+    # quietly becoming a production-shaped one by accident.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: fleetflow-quota
+  namespace: fleetflow
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    pods: "50"
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: fleetflow-pdb
+  namespace: fleetflow
+spec:
+  # A node drain must never take the whole platform down with it.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: fleetflow

@@ -81,11 +81,13 @@ const describedBy = computed(() => {
       @blur="emit('blur', $event)"
     />
 
+    <!-- Both are shown: a hint that disappears the moment an error appears is
+         exactly the hint a user needs while they are fixing one. -->
+    <p v-if="hint" :id="`${id}-hint`" class="text-small text-content-muted dark:text-[#94A3B8]">
+      {{ hint }}
+    </p>
     <p v-if="error" :id="`${id}-error`" class="text-small text-danger" role="alert">
       {{ error }}
-    </p>
-    <p v-else-if="hint" :id="`${id}-hint`" class="text-small text-content-muted dark:text-[#94A3B8]">
-      {{ hint }}
     </p>
   </div>
 </template>

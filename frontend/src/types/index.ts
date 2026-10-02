@@ -197,6 +197,10 @@ export interface CreateOrderRequest {
   postalCode: string
 }
 
+export interface CancelOrderRequest {
+  reason?: string
+}
+
 export interface OrderKpiResponse {
   totalOrders: number
   activeOrders: number
@@ -385,6 +389,23 @@ export interface VehicleQuery extends PagedQuery {
   status?: VehicleStatus | ''
   type?: VehicleType | ''
   search?: string
+}
+
+export interface UpdateVehicleRequest {
+  registrationNumber: string
+  type: VehicleType
+  capacity: number
+  status: VehicleStatus
+}
+
+export interface UpdateDeliveryStatusRequest {
+  status: DeliveryStatus
+  reason?: string
+}
+
+export interface AssignDeliveryRequest {
+  driverId: number
+  vehicleId: number
 }
 
 export interface ProductQuery extends PagedQuery {

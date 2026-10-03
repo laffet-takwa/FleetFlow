@@ -20,7 +20,7 @@
 #   POLL_MAX   seconds to wait per step (default 90)
 #   SKIP_SSE   set to 1 to skip the SSE check
 #
-# Dependencies: bash, curl and python (used only to parse JSON). jq is not required.
+# Dependencies: bash, curl and node (used only to parse JSON). jq is not required.
 
 set -uo pipefail
 
@@ -46,47 +46,59 @@ ok()    { PASSED=$((PASSED + 1)); printf '  %s✓%s %s\n' "${GREEN}" "${RESET}" 
 fail()  { FAILED=$((FAILED + 1)); printf '  %s✗%s %s\n' "${RED}" "${RESET}" "$1"; }
 info()  { printf '  %s·%s %s\n' "${YELLOW}" "${RESET}" "$1"; }
 
-# Minimal JSON field reader. python is present on every machine that can run Docker,
-# so this avoids a jq dependency without pulling one in.
+# Minimal JSON field reader.
+#
+# Node is used rather than python or jq: it is already a hard requirement of this
+# project (the SPA is built with it), so the acceptance test adds no dependency the
+# reader does not already have. jq is not required.
 json() {
-  python3 -c "
-import json,sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    print(''); sys.exit(0)
-path = '''$1'''
-cur = data
-for part in path.split('.'):
-    if part == '':
-        continue
-    if isinstance(cur, list):
-        try:
-            cur = cur[int(part)]
-        except Exception:
-            print(''); sys.exit(0)
-    elif isinstance(cur, dict):
-        cur = cur.get(part)
-    else:
-        print(''); sys.exit(0)
-    if cur is None:
-        print(''); sys.exit(0)
-print(cur if not isinstance(cur,(dict,list)) else json.dumps(cur))
-" 2>/dev/null || python -c "
-import json,sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    print(''); sys.exit(0)
-cur = data
-for part in '''$1'''.split('.'):
-    if part == '':
-        continue
-    cur = cur[int(part)] if isinstance(cur, list) and part.isdigit() else (cur.get(part) if isinstance(cur, dict) else None)
-    if cur is None:
-        print(''); sys.exit(0)
-print(cur if not isinstance(cur,(dict,list)) else json.dumps(cur))
-" 2>/dev/null
+  node -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => (raw += chunk));
+    process.stdin.on("end", () => {
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch (error) {
+        process.stdout.write("");
+        return;
+      }
+      let cursor = data;
+      for (const part of process.argv[1].split(".")) {
+        if (part === "") continue;
+        if (Array.isArray(cursor)) {
+          cursor = /^\d+$/.test(part) ? cursor[Number(part)] : undefined;
+        } else if (cursor !== null && typeof cursor === "object") {
+          cursor = cursor[part];
+        } else {
+          cursor = undefined;
+        }
+        if (cursor === null || cursor === undefined) {
+          process.stdout.write("");
+          return;
+        }
+      }
+      if (cursor === null || cursor === undefined) process.stdout.write("");
+      else if (typeof cursor === "object") process.stdout.write(JSON.stringify(cursor));
+      else process.stdout.write(String(cursor));
+    });
+  ' "$1"
+}
+
+# Counts the entries of a JSON array, for list endpoints that have no count field.
+array_length() {
+  node -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => (raw += chunk));
+    process.stdin.on("end", () => {
+      try {
+        const parsed = JSON.parse(raw);
+        process.stdout.write(String(Array.isArray(parsed) ? parsed.length : 0));
+      } catch (error) {
+        process.stdout.write("0");
+      }
+    });
+  '
 }
 
 api() {
@@ -254,7 +266,7 @@ if [[ -z "$DRIVER_TOKEN" ]]; then fail "could not sign in as driver1@fleetflow.l
 # The seeded driver's account id must match the `userId` the warehouse/exports agree on.
 DRIVER_ID_FROM_TOKEN="$(api GET /api/auth/me '' "$DRIVER_TOKEN" | json id)"
 MY_DELIVERIES="$(api GET /api/deliveries/mine '' "$DRIVER_TOKEN")"
-MY_COUNT="$(printf '%s' "$MY_DELIVERIES" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else 0)' 2>/dev/null || echo 0)"
+MY_COUNT="$(printf '%s' "$MY_DELIVERIES" | array_length)"
 if [[ "${MY_COUNT:-0}" -gt 0 ]]; then
   ok "driver account ${DRIVER_ID_FROM_TOKEN} sees ${MY_COUNT} delivery(ies)"
 else
@@ -293,11 +305,17 @@ fi
 
 # ----------------------------------------- 13. the driver publishes positions
 step "13. The driver simulation streams positions into Redis and MongoDB"
-LAT=36.8065; LON=10.1815
+# Integer hundred-thousandths, so each tick steps +0.0007 / +0.0009 without bc or python.
+LAT_STEP=$((36 * 1000000 + 806500))
+LON_STEP=$((10 * 1000000 + 181500))
 PUBLISHED=0
 for i in $(seq 1 8); do
-  LAT=$(python3 -c "print(f'{${LAT} + 0.0007:.6f}')")
-  LON=$(python3 -c "print(f'{${LON} + 0.0009:.6f}')")
+  # Stepping with integer arithmetic on hundred-thousandths keeps this free of bc and of
+  # python: the coordinate is always the previous one plus a fixed increment.
+  LAT_STEP=$((LAT_STEP + 7))
+  LON_STEP=$((LON_STEP + 9))
+  LAT=$(printf '%d.%06d' $((LAT_STEP / 1000000)) $((LAT_STEP % 1000000)))
+  LON=$(printf '%d.%06d' $((LON_STEP / 1000000)) $((LON_STEP % 1000000)))
   CODE="$(status_of POST /api/tracking/locations \
     "{\"deliveryId\":${DELIVERY_ID},\"latitude\":${LAT},\"longitude\":${LON},\"speedKph\":32}" "$DRIVER_TOKEN")"
   [[ "$CODE" == "202" ]] && PUBLISHED=$((PUBLISHED + 1))
@@ -355,7 +373,7 @@ fi
 # ------------------------------------------------------- 18. the customer is told
 step "18. The customer received a notification"
 NOTIFICATIONS="$(api GET '/api/notifications?page=0&size=20' '' "$CUSTOMER_TOKEN")"
-NOTE_COUNT="$(printf '%s' "$NOTIFICATIONS" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("content",[])))' 2>/dev/null || echo 0)"
+NOTE_COUNT="$(printf '%s' "$NOTIFICATIONS" | json content | array_length)"
 UNREAD="$(api GET /api/notifications/unread-count '' "$CUSTOMER_TOKEN" | json unreadCount)"
 if [[ "${NOTE_COUNT:-0}" -gt 0 ]]; then
   ok "${NOTE_COUNT} notification(s) present, ${UNREAD} unread"

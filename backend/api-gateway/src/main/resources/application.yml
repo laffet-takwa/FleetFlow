@@ -18,9 +18,10 @@ spring:
 
   cloud:
     gateway:
-      default-filters:
-        # Strip hop-by-hop headers that must not survive the proxy hop.
-        - RemoveRequestHeader=Cookie
+      # No header-rewriting default filters here. Spring Cloud Gateway applies them
+      # against the CORS-decorated exchange, whose request and response headers are
+      # read-only, so a RemoveRequestHeader default makes every routed request fail
+      # with UnsupportedOperationException.
       httpclient:
         connect-timeout: 5000
         response-timeout: 30s

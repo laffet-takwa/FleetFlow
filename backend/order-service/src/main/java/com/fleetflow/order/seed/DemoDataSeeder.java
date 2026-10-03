@@ -169,20 +169,27 @@ public class DemoDataSeeder implements ApplicationRunner {
                     ? (random.nextBoolean() ? "Out of stock for one of the lines" : "Customer changed their mind")
                     : null;
 
+            // The PostgreSQL driver cannot infer a SQL type for java.time.Instant when
+            // binding through JDBC, so it is converted to OffsetDateTime here. Hibernate
+            // handles Instant itself; only this hand-written INSERT needs the conversion.
+            java.time.OffsetDateTime createdAtUtc =
+                    java.time.OffsetDateTime.ofInstant(createdAt, ZoneOffset.UTC);
+
             orders.add(new Object[] { orderId, customerId, target.name(), subtotal, DELIVERY_FEE, total,
                     CURRENCY, address.address(), address.city(), address.postalCode(),
-                    deliveryIdFor(target, orderId), cancelledReason, createdAt, createdAt });
+                    deliveryIdFor(target, orderId), cancelledReason, createdAtUtc, createdAtUtc });
 
             for (SeedLine line : lines) {
                 items.add(new Object[] { itemId++, orderId, line.product().id(), line.product().name(),
-                        line.quantity(), line.unitPrice(), line.lineSubtotal(), createdAt, createdAt });
+                        line.quantity(), line.unitPrice(), line.lineSubtotal(), createdAtUtc, createdAtUtc });
             }
 
             for (int step = 0; step < chain.size(); step++) {
                 OrderStatus previous = step == 0 ? null : chain.get(step - 1);
                 history.add(new Object[] { historyId++, orderId, chain.get(step).name(),
                         previous == null ? null : previous.name(),
-                        sourceFor(step, chain).name(), noteFor(chain.get(step)), changedAt(createdAt, step) });
+                        sourceFor(step, chain).name(), noteFor(chain.get(step)),
+                        java.time.OffsetDateTime.ofInstant(changedAt(createdAt, step), ZoneOffset.UTC) });
             }
         }
 

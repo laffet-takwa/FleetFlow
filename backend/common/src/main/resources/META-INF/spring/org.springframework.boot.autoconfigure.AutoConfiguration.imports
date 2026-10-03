@@ -1,1 +1,2 @@
 com.fleetflow.common.config.FleetFlowCommonAutoConfiguration
+com.fleetflow.common.config.FleetFlowWebAutoConfiguration

@@ -38,12 +38,28 @@ public class GatewayErrorHandler implements ErrorWebExceptionHandler {
         String error = status.name();
         String message = status == HttpStatus.NOT_FOUND
                 ? "No route matches " + exchange.getRequest().getMethod() + " "
-                        + exchange.getRequest().getURI().getPath()
+                        + exchange.getRequest().getPath().value()
                 : (ex.getMessage() == null ? status.getReasonPhrase() : ex.getMessage());
 
-        log.warn("Gateway rejected {} {} -> {} [{}]",
-                exchange.getRequest().getMethod(), exchange.getRequest().getURI().getPath(),
-                status.value(), exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
+        // The correlation id is resolved the same way the filter resolves it, so a
+        // request that arrived without one still gets a stable id in the error body —
+        // and it is never rendered as the literal string "null".
+        String correlationId = exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER);
+        if (correlationId == null || correlationId.isBlank()) {
+            correlationId = CorrelationId.newId();
+        }
+
+        // A 5xx is ours, not the caller's: log the throwable so the cause is
+        // diagnosable. The client still receives only the generic message.
+        if (status.is5xxServerError()) {
+            log.error("Gateway failed on {} {} [correlationId={}]",
+                    exchange.getRequest().getMethod(), exchange.getRequest().getPath().value(),
+                    correlationId, ex);
+        } else {
+            log.warn("Gateway rejected {} {} -> {} [correlationId={}]",
+                    exchange.getRequest().getMethod(), exchange.getRequest().getPath().value(),
+                    status.value(), correlationId);
+        }
 
         String payload = ("{\"timestamp\":\"%s\",\"status\":%d,\"error\":\"%s\",\"message\":\"%s\","
                 + "\"path\":\"%s\",\"correlationId\":\"%s\",\"violations\":[]}")
@@ -52,8 +68,8 @@ public class GatewayErrorHandler implements ErrorWebExceptionHandler {
                         status.value(),
                         error,
                         message.replace("\"", "'"),
-                        exchange.getRequest().getURI().getPath(),
-                        exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
+                        exchange.getRequest().getPath().value(),
+                        correlationId);
 
         exchange.getResponse().setStatusCode(status);
         exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);

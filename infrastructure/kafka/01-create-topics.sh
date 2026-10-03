@@ -12,8 +12,12 @@
 
 set -euo pipefail
 
+# The apache/kafka image does not put its bin directory on PATH, so every invocation
+# below uses the absolute path. A bare `kafka-topics.sh` fails with "command not found",
+# which inside the wait loop below looks like an unreachable broker and hangs forever.
+KAFKA_HOME=/opt/kafka
 BOOTSTRAP="${KAFKA_BOOTSTRAP:-kafka:9092}"
-PARTITIONS="${KAFKA_PARTITIONS:-6}"
+TOPICS="$KAFKA_HOME/bin/kafka-topics.sh"
 
 declare -A TOPIC_PARTITIONS=(
     [order.created]=6
@@ -27,15 +31,30 @@ declare -A TOPIC_PARTITIONS=(
     [delivery.cancelled]=3
 )
 
+echo "==> verifying the topic CLI is present at ${TOPICS}"
+if [[ ! -x "$TOPICS" ]]; then
+    echo "FATAL: ${TOPICS} is missing or not executable" >&2
+    exit 1
+fi
+
 echo "==> waiting for the broker at ${BOOTSTRAP}"
-until kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list >/dev/null 2>&1; do
+attempt=0
+until "$TOPICS" --bootstrap-server "${BOOTSTRAP}" --list >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if (( attempt % 20 == 0 )); then
+        echo "==> still waiting after $((attempt * 3))s"
+    fi
+    if (( attempt > 60 )); then
+        echo "FATAL: broker at ${BOOTSTRAP} never became reachable" >&2
+        exit 1
+    fi
     sleep 3
 done
 
 for topic in "${!TOPIC_PARTITIONS[@]}"; do
     partitions="${TOPIC_PARTITIONS[$topic]}"
     echo "==> creating topic '${topic}' with ${partitions} partitions"
-    kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" \
+    "$TOPICS" --bootstrap-server "${BOOTSTRAP}" \
         --create --if-not-exists \
         --topic "${topic}" \
         --partitions "${partitions}" \
@@ -43,4 +62,4 @@ for topic in "${!TOPIC_PARTITIONS[@]}"; do
 done
 
 echo "==> topics now present:"
-kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list | sort
+"$TOPICS" --bootstrap-server "${BOOTSTRAP}" --list | sort

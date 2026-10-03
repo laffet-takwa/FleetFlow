@@ -1,10 +1,13 @@
 package com.fleetflow.gateway.filter;
 
-import org.springframework.cloud.gateway.filter.GatewayFilterChain;
-import org.springframework.cloud.gateway.filter.GlobalFilter;
+import java.util.function.Consumer;
+
 import org.springframework.core.Ordered;
+import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.WebFilter;
+import org.springframework.web.server.WebFilterChain;
 
 import com.fleetflow.common.correlation.CorrelationId;
 
@@ -18,19 +21,25 @@ import reactor.core.publisher.Mono;
  * appears in the gateway access log, in each downstream service, and in every Kafka
  * event produced while handling the request.
  *
- * <p>The id travels in the request header rather than a thread local: a reactive
- * pipeline hops between event loop threads, so a thread local set here would not be
- * visible downstream.
+ * <p>This is a {@link WebFilter} rather than a {@code GlobalFilter} on purpose. Spring
+ * Cloud Gateway runs its {@code WebFilter} chain (CORS, security) before the global
+ * filter chain, and the CORS filter returns a <em>decorated</em> exchange whose response
+ * headers are read-only. Setting the response header from a global filter therefore
+ * fails with {@code UnsupportedOperationException: ReadOnlyHttpHeaders}. Running first
+ * means the headers are still mutable, and the id is already on the request before any
+ * other filter or filter chain observes it.
  */
 @Component
-public class CorrelationIdGlobalFilter implements GlobalFilter, Ordered {
+public class CorrelationIdWebFilter implements WebFilter, Ordered {
 
     @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+    public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         String correlationId = resolve(exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
-        // The response object is shared with every downstream exchange, so setting the
-        // header up front is enough for it to reach the client.
-        exchange.getResponse().getHeaders().set(CorrelationId.HEADER, correlationId);
+
+        Consumer<ServerHttpResponse> responseDecorator =
+                response -> response.getHeaders().set(CorrelationId.HEADER, correlationId);
+        responseDecorator.accept(exchange.getResponse());
+
         ServerWebExchange mutated = exchange.mutate()
                 .request(request -> request.headers(headers -> headers.set(CorrelationId.HEADER, correlationId)))
                 .build();
@@ -46,6 +55,7 @@ public class CorrelationIdGlobalFilter implements GlobalFilter, Ordered {
 
     @Override
     public int getOrder() {
+        // Ahead of CORS and the security filters, so the header exists for the whole chain.
         return Ordered.HIGHEST_PRECEDENCE;
     }
 }

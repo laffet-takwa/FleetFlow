@@ -143,12 +143,19 @@ spec:
             - -c
             - |
               set -euo pipefail
-              echo "waiting for the broker"
-              until /opt/kafka/bin/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list >/dev/null 2>&1; do
-                sleep 5
+              TOPICS=/opt/kafka/bin/kafka-topics.sh
+              echo "==> waiting for the broker"
+              attempt=0
+              until "${TOPICS}" --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do
+                attempt=$((attempt + 1))
+                if (( attempt > 60 )); then
+                  echo "FATAL: broker never became reachable" >&2
+                  exit 1
+                fi
+                sleep 3
               done
               create() {
-                /opt/kafka/bin/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" \
+                "${TOPICS}" --bootstrap-server kafka:9092 \
                   --create --if-not-exists --topic "$1" --partitions "$2" --replication-factor 1
               }
               create order.created 6
@@ -160,4 +167,4 @@ spec:
               create delivery.completed 6
               create delivery.failed 3
               create delivery.cancelled 3
-              /opt/kafka/bin/kafka-topics.sh --bootstrap-server "${BOOTSTRAP}" --list
+              "${TOPICS}" --bootstrap-server kafka:9092 --list | sort

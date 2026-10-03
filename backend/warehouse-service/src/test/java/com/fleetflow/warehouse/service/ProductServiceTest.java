@@ -73,8 +73,7 @@ class ProductServiceTest {
     @Test
     @DisplayName("a new product defaults to active and reads as out of stock until it is stocked")
     void createDefaultsToActiveAndNoStock() {
-        when(productRepository.existsBySkuIgnoreCase("FF-ST-0020")).thenReturn(false);
-        when(inventoryRepository.findByWarehouseIdAndProductIdIn(any(), anyList())).thenReturn(List.of());
+        when(productRepository.existsBySkuIgnoreCase("ff-st-0020")).thenReturn(false);
         when(productRepository.save(any(Product.class))).thenAnswer(invocation -> {
             Product saved = invocation.getArgument(0);
             saved.setId(GENERATED_ID);

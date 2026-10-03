@@ -1,277 +1,385 @@
 # FleetFlow
 
-Smart logistics and delivery platform — a microservices backend with a Vue 3 single-page
-front end, covering customer ordering, warehouse inventory, last-mile delivery and live
-tracking.
+**Smart Logistics & Delivery Platform** — from warehouse to doorstep, every delivery in motion.
 
-## Features
+A production-shaped microservices platform built to demonstrate one complete business
+flow end to end, rather than a collection of CRUD screens.
 
-- **Storefront** — customers browse the catalogue, place orders and follow each delivery on a live map.
-- **Operations console** — order pipeline, inventory levels, warehouses, drivers, vehicles, analytics.
-- **Driver app** — assigned deliveries and status transitions along the enforced lifecycle
-  `created → assigned → picked up → in transit → delivered`, with `failed` and `cancelled` branches,
-  plus notifications.
-- **Event-driven backbone** — order, inventory and delivery changes travel over Kafka; the tracking
-  service streams position updates to the browser over Server-Sent Events.
-- **Role-based access** — `ADMIN`, `OPERATIONS`, `DRIVER`, `CUSTOMER` with JWT authentication and
-  per-role routing in the SPA.
-- **Observability** — optional ELK stack (Elasticsearch, Logstash, Filebeat, Kibana) fed by every
-  service, with correlation IDs threaded through logs, events and HTTP calls.
+```mermaid
+graph LR
+    Browser["Vue 3 SPA<br/>Customer · Driver · Operations"]
+    Gateway["API Gateway"]
+    Kafka[["Kafka"]]
+    OS["Order"]
+    WS["Warehouse"]
+    DS["Delivery"]
+    TS["Tracking"]
+    NS["Notification"]
+    Data[("PostgreSQL · MongoDB · Redis")]
 
-## Architecture
-
-Seven domain services sit behind an API gateway, each owning its own data.
-
-| Service | Port | Datastore | Responsibility |
-|---|---|---|---|
-| `api-gateway` | 8080 | — | Single entry point, JWT filter, routing, CORS |
-| `auth-service` | 8081 | PostgreSQL `fleetflow_auth` | Registration, login, token issuance, identities |
-| `customer-service` | 8082 | PostgreSQL `fleetflow_customer` | Customer profiles and addresses |
-| `order-service` | 8083 | PostgreSQL `fleetflow_order` | Orders, items, status history |
-| `warehouse-service` | 8084 | PostgreSQL `fleetflow_warehouse` | Catalogue, stock levels, warehouses, reservations |
-| `delivery-service` | 8085 | PostgreSQL `fleetflow_delivery` | Drivers, vehicles, deliveries, assignment |
-| `tracking-service` | 8086 | MongoDB `fleetflow_tracking`, Redis | Location history and the SSE stream |
-| `notification-service` | 8087 | PostgreSQL `fleetflow_notification` | Notification feed, subscriptions |
-| `discovery-server` | 8761 | — | Optional Eureka registry (`--profile discovery`) |
-
-Supporting infrastructure: PostgreSQL 16, MongoDB 7, Redis 7, Kafka 3.8 (KRaft mode), and the
-optional ELK stack.
-
-```
-                       ┌──────────────┐
-   browser  ──────────▶│  api-gateway │──────────▶ auth / customer / order /
-                       │    :8080     │             warehouse / delivery /
-                       └──────┬───────┘             tracking / notification
-                              │
-                              ▼
-                       ┌──────────────┐        ┌───────────────┐
-                       │    Kafka     │◀──────▶│ event bus     │
-                       │  order.*     │        │ topology      │
-                       │  inventory.* │        └───────────────┘
-                       │  delivery.*  │
-                       └──────────────┘
-                              │
-                       ┌──────┴───────┐
-                       │  SSE stream  │──▶ browser
-                       └──────────────┘
+    Browser --> Gateway
+    Gateway --> OS & WS & DS & TS & NS
+    OS --> Kafka
+    Kafka --> WS
+    WS --> Kafka
+    Kafka --> DS
+    DS --> Kafka
+    Kafka --> TS & NS
+    OS & WS & DS & NS & TS --> Data
 ```
 
-The SPA only ever talks to the gateway, never to an individual service. In development Vite
-proxies `/api` to `http://localhost:8080`; in a container nginx does the same.
+---
 
-## Tech stack
-
-**Backend** — Java 17, Spring Boot 3.3.5, Spring Cloud 2023.0.3, Spring Security + JJWT,
-Spring Data JPA, Flyway, springdoc-openapi, Maven.
-
-**Frontend** — Vue 3.5 (`<script setup>`), TypeScript, Vite 5, Pinia, Vue Router, Tailwind CSS 3,
-Leaflet, Axios.
-
-## Prerequisites
-
-- Docker with Compose v2 — the only requirement for the full stack
-- JDK 17 and Maven 3.9+ — for running a backend service outside Docker
-- Node.js 20+ — for running the SPA outside Docker
-
-## Quick start
+## The demo, in thirty seconds
 
 ```bash
-git clone https://github.com/laffet-takwa/FleetFlow.git
-cd FleetFlow
-
-cp .env.example .env          # optional: every value has a working default
-
+cp .env.example .env
 docker compose up --build
+./scripts/verify-e2e.sh
 ```
 
-This builds the images, starts the datastores, creates the Kafka topics, waits for every service to
-report healthy and serves the SPA.
+Open **http://localhost:8088** and sign in as `customer1@fleetflow.local` /
+`Password123!`.
 
-| Endpoint | URL |
+The verification script walks the whole flow — registration, checkout, stock
+reservation, delivery creation, assignment, driver progress, live tracking, completion
+and notification — and prints a pass/fail line for each of the twenty steps. It is the
+acceptance test for this README's claims, and it runs against the real stack.
+
+### Watch it happen by hand
+
+1. Sign in as **customer** (`customer1@fleetflow.local`) and place an order from
+   `/customer/checkout`. Four steps: products, review, address, confirm. Payment is cash
+   on delivery; there is no payment UI because there is no payment provider.
+2. Sign in as **operations** (`operations@fleetflow.local`) in a private window. Open
+   **Deliveries**, assign a driver and a vehicle. The order timeline advances on its own
+   as events arrive.
+3. Sign in as **driver** (`driver1@fleetflow.local`) on a phone-sized window. Open the
+   assigned delivery and step it through *picked up* → *start delivery*.
+4. Back in the customer window, open **Track delivery**. The Leaflet map follows the van
+   over Server-Sent Events. The driver window has a **DEMO SIMULATION** panel that
+   generates the positions — there is no GPS hardware in this project, and the interface
+   says so plainly rather than pretending.
+5. Complete the delivery from the driver screen. The order flips to **Delivered**, a
+   notification arrives in the customer header without a page refresh, and the operations
+   dashboard counters move.
+
+---
+
+## What is actually implemented
+
+Everything below works against real infrastructure. There is no mocked layer anywhere in
+the request path.
+
+| | |
 |---|---|
-| Web app | http://localhost:8088 |
-| API gateway | http://localhost:8080 |
-| Swagger UI (gateway routes) | http://localhost:8080/swagger-ui.html |
-| Health | http://localhost:8080/actuator/health |
+| **Auth** | Registration, login, BCrypt hashing, HS256 JWT, stateless sessions, role-based authorisation, method-level `@PreAuthorize`, ownership checks |
+| **Orders** | Server-side pricing, product snapshots, status machine, history timeline, customer cancellation rules |
+| **Inventory** | Atomic reservation, `available`/`reserved` split with database `CHECK` constraints, per-order-line idempotency, low-stock derivation |
+| **Deliveries** | Full lifecycle with an enforced state machine, driver and vehicle allocation with conflict checks, free-on-completion |
+| **Events** | Nine Kafka topics, a typed envelope with correlation id and event id, idempotent consumers, explicit partition counts |
+| **Tracking** | Redis for the latest position, MongoDB for the trail with a TTL index, Server-Sent Events for live updates |
+| **Notifications** | Event-driven, deduplicated by `eventId`, pushed over SSE, unread counts |
+| **Observability** | Actuator health groups, correlation id through gateway → service → Kafka → logs, an ELK profile that makes the trace searchable |
+| **Delivery** | Multi-stage Docker images, Compose with three profiles, Kubernetes manifests with probes and a read-only root filesystem, GitHub Actions CI |
 
-First build downloads Maven and npm dependencies and takes a while. Startup is sequential by design:
-the gateway waits for all downstream services to be healthy.
+---
 
-To reset everything, including the seeded demo data:
+## Architecture at a glance
 
-```bash
-docker compose down -v
+Eight Spring Boot services behind a gateway. Each owns its data; nothing reads another
+service's tables.
+
+| Service | Port | Owns | Consumes → Produces |
+|---|---|---|---|
+| `api-gateway` | 8080 | Routing, JWT verification, CORS, correlation id | — |
+| `auth-service` | 8081 | Users, credentials, tokens | — |
+| `customer-service` | 8082 | Customer profiles | — |
+| `order-service` | 8083 | Orders, items, status history | `inventory.*`, `delivery.*` → `order.created` |
+| `warehouse-service` | 8084 | Products, warehouses, stock | `order.created` → `inventory.reserved`, `inventory.insufficient` |
+| `delivery-service` | 8085 | Drivers, vehicles, deliveries | `inventory.reserved` → `delivery.*` |
+| `tracking-service` | 8086 | Location history and live state | `delivery.*` → — |
+| `notification-service` | 8087 | Notifications | `order.created`, `inventory.*`, `delivery.*` → — |
+| `discovery-server` | 8761 | Optional Eureka registry (off by default) | — |
+
+### The flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Customer
+    participant O as Order
+    participant K as Kafka
+    participant W as Warehouse
+    participant D as Delivery
+    participant R as Operations
+    participant V as Driver
+    participant T as Tracking
+
+    C->>O: POST /api/orders
+    O->>W: product snapshots (internal REST)
+    O->>K: order.created
+    K->>W: consume
+    W->>W: reserve stock atomically
+    W->>K: inventory.reserved
+    K->>D: create delivery
+    K->>O: order → CONFIRMED
+    R->>D: assign driver + vehicle
+    D->>K: delivery.assigned
+    V->>D: PICKED_UP, IN_TRANSIT
+    D->>K: delivery.started
+    V->>T: POST /api/tracking/locations
+    T->>T: Redis latest + MongoDB trail
+    T-->>C: SSE location events
+    V->>D: DELIVERED
+    D->>K: delivery.completed
+    K->>O: order → DELIVERED
+    K->>Notification: notification
+    Notification-->>C: SSE push
 ```
 
-## Demo accounts
+### Why events rather than calls
 
-Seeded on first start when `SEED_ENABLED=true`. Every account shares the password
-**`Password123!`**.
+The obvious design has the Order Service call the Warehouse Service synchronously. It
+fails in a specific way: the order is already committed, so a warehouse outage leaves
+customers with orders that silently never fulfil.
 
-| Role | Email |
-|---|---|
-| Admin | `admin@fleetflow.local` |
-| Operations | `operations@fleetflow.local` |
-| Driver | `driver1@fleetflow.local` … `driver5@fleetflow.local` |
-| Customer | `customer1@fleetflow.local` … `customer10@fleetflow.local` |
+Publishing `order.created` makes reservation asynchronous and retryable. Kafka can be
+down for a minute and the order still fulfils. Synchronous calls are kept only where an
+event genuinely cannot answer the question — the price at checkout, and the contact
+snapshot when a delivery is created.
 
-Set `SEED_ENABLED=false` to start with empty databases and no demo identities. The seeders are
-idempotent — they skip when data already exists.
+### Design decisions worth arguing about
 
-## Local development
+* **A shared kernel module.** Error contract, correlation id, JWT primitives, event
+  schemas and consumer idempotency live in `fleetflow-common` and are auto-configured.
+  Duplicating an error handler seven times would be the alternative.
+* **HS256 JWT written by hand** on `javax.crypto.Mac` — about eighty lines, a fixed
+  algorithm, no third-party trust surface, constant-time signature comparison.
+* **Events as explicit JSON.** `KafkaDomainEventPublisher` serialises the envelope
+  itself rather than using reflective Kafka serializers, so the bytes on the wire match
+  `docs/kafka-events.md` and no trusted-package configuration is needed.
+* **Consume-side idempotency** via `INSERT … ON CONFLICT DO NOTHING` on `eventId` — one
+  atomic statement, no lock. The tracking service skips it deliberately: its consumers
+  are upserts, so a replay is harmless.
+* **SSE through `fetch`, not `EventSource`.** `EventSource` cannot set headers, and the
+  usual workaround puts the access token in the query string, where it lands in every
+  access log and proxy trace.
+* **No Eureka by default.** The gateway routes by explicit URL. The registry exists
+  behind a Compose profile for the discovery-based variant, because defaulting to it
+  would add a process that must be healthy before anything else can start, in exchange
+  for load balancing two replicas already provide.
+* **One Postgres instance, six databases.** Ownership is enforced by role, not by
+  instance. Stated as a limitation in the docs rather than glossed over.
 
-Run the datastores and infrastructure in Docker, then run the services and the SPA on the host for
-fast rebuilds.
+---
 
-```bash
-# infrastructure only
-docker compose up -d postgres mongodb redis kafka kafka-init
+## Technology
 
-# backend — build common first, then any service
-mvn -f backend/pom.xml -pl common -am install -DskipTests
-mvn -f backend/pom.xml -pl auth-service -am spring-boot:run
+**Backend** Java 17 · Spring Boot 3.3.5 · Spring Web · Spring Security · Spring Data
+JPA · Spring Kafka · Spring Cloud Gateway · Flyway · PostgreSQL · MongoDB · Redis ·
+springdoc-openapi · Actuator · JUnit 5 · Mockito · Testcontainers
 
-# frontend
-cd frontend
-npm install
-npm run dev                  # http://localhost:5173
+**Frontend** Vue 3.5 · TypeScript (strict) · Vite · Pinia · Vue Router · Tailwind CSS ·
+Leaflet + OpenStreetMap · Axios · ESLint · vue-tsc
+
+**Platform** Docker · Docker Compose · Kubernetes · GitHub Actions · ELK
+
+---
+
+## Repository layout
+
+```mermaid
+graph TB
+    subgraph Backend
+        Common["common<br/>shared kernel"]
+        GW["api-gateway"]
+        Svc["7 business services"]
+        Disc["discovery-server"]
+    end
+    subgraph Frontend
+        Fe["Vue 3 SPA<br/>3 role-based shells"]
+    end
+    subgraph Infra["infrastructure"]
+        Docker["docker"]
+        K8s["kubernetes"]
+        Elk["elk"]
+    end
+    subgraph Docs["docs"]
+        DocFiles["architecture · api · kafka-events<br/>database · deployment · ui · CONTRACTS"]
+    end
+    Scripts["scripts/verify-e2e.sh"]
+    Compose["docker-compose.yml"]
+    CI[".github/workflows"]
+
+    Compose -.-> Backend
+    Compose -.-> Frontend
+    Backend -.-> Infra
+    Backend -.-> Docs
+    Scripts -.-> Compose
 ```
 
-`backend/common` holds the shared kernel — error handling, correlation IDs, JWT, the Kafka envelope
-and idempotency helpers. Everything else depends on it, so it must be installed to the local
-repository before a service will build.
-
-The Vite dev server proxies to the gateway. Override the target with `VITE_DEV_GATEWAY_URL` if the
-gateway is not on port 8080.
-
-### Verification
-
-```bash
-# backend
-mvn -f backend/pom.xml test          # JUnit 5 unit tests, no infrastructure required
-
-# frontend
-cd frontend
-npm run lint
-npm run typecheck
-npm run build
-```
-
-The backend suite is pure unit tests (Mockito collaborators, no Spring context), so it runs without
-Docker or a running database.
-
-## Configuration
-
-All settings come from the environment. `.env` holds the local values; every key is documented in
-`.env.example`.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `DB_PASSWORD` | `fleetflow` | PostgreSQL password for all databases |
-| `JWT_SECRET` | dev placeholder | Token signing key — **override outside local development** |
-| `FLEETFLOW_INTERNAL_TOKEN` | dev placeholder | Guards `/internal/**` endpoints — **override outside local development** |
-| `SEED_ENABLED` | `true` | Insert demo identities and reference data |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:8088,http://localhost:80` | Browser origins allowed to call the gateway |
-| `LOG_LEVEL_COM_FLEETFLOW` | `INFO` | Log level for application code |
-| `*_PORT` | see `.env.example` | Host port for each service |
-
-Generate real secrets with `openssl rand -base64 48`.
-
-## API surface
-
-The gateway routes every public path:
-
-| Prefix | Service |
-|---|---|
-| `/api/auth/**` | auth-service |
-| `/api/customers/**` | customer-service |
-| `/api/orders/**` | order-service |
-| `/api/products/**`, `/api/inventory/**`, `/api/warehouses/**` | warehouse-service |
-| `/api/drivers/**`, `/api/vehicles/**`, `/api/deliveries/**` | delivery-service |
-| `/api/tracking/**` | tracking-service |
-| `/api/notifications/**` | notification-service |
-
-`/actuator/**` and `/swagger-ui/**` are exposed on the gateway for health checks and API browsing.
-The gateway documents its own routes only; every service also serves its own OpenAPI UI on its own
-port (`http://localhost:8081/swagger-ui.html` for `auth-service`, and so on).
-
-## Event topology
-
-Topics are declared explicitly by `infrastructure/kafka/01-create-topics.sh` so the topology is
-reviewable and partition counts match the ordering requirements. Order-keyed topics get 6
-partitions; low-volume administrative topics get 3.
-
-| Topic | Partitions | Meaning |
-|---|---|---|
-| `order.created` | 6 | A new order was accepted |
-| `inventory.reserved` | 6 | Stock was reserved for an order |
-| `inventory.insufficient` | 3 | Reservation failed |
-| `delivery.assigned` | 6 | A driver was assigned |
-| `delivery.picked-up` | 6 | The driver collected the parcel |
-| `delivery.started` | 6 | The delivery is in transit |
-| `delivery.completed` | 6 | The delivery was delivered |
-| `delivery.failed` | 3 | The delivery failed |
-| `delivery.cancelled` | 3 | The delivery was cancelled |
-
-Messages are JSON `EventEnvelope` records carrying an `eventId`, `eventType`, `topic`,
-`correlationId`, `timestamp` and `payload`. Consumers de-duplicate on `eventId`.
-
-## Observability
-
-```bash
-docker compose --profile elk up -d
-```
-
-Kibana is then available on http://localhost:5601. Filebeat reads the Docker log files through the
-Docker socket and forwards them to Logstash, which indexes them as `fleetflow-logs-YYYY.MM.dd`.
-Create a data view for that pattern the first time you open Kibana. Filter and set the log level with
-`LOG_LEVEL_COM_FLEETFLOW`.
-
-Correlation IDs are generated at the edge, echoed on responses via `X-Correlation-ID`, propagated into
-event envelopes and restored inside consumers, so one request can be followed across every service.
-
-## Project layout
-
-```
-FleetFlow/
-├── backend/                   Maven aggregator (com.fleetflow)
-│   ├── common/                shared kernel: errors, JWT, Kafka envelope, correlation IDs
-│   ├── api-gateway/           entry point and routing
-│   ├── auth-service/          identities and tokens
-│   ├── customer-service/      customer profiles and addresses
-│   ├── order-service/         orders and status history
-│   ├── warehouse-service/     catalogue, inventory and reservations
-│   ├── delivery-service/      drivers, vehicles, deliveries
-│   ├── tracking-service/      location history and SSE
-│   ├── notification-service/  notification feed
-│   └── discovery-server/      optional Eureka registry
-├── frontend/                  Vue 3 + Vite SPA
+```text
+fleetflow/
+├── backend/
+│   ├── common/              shared kernel: errors, correlation id, JWT, events, idempotency
+│   ├── api-gateway/         routing, token verification, CORS, access log
+│   ├── auth-service/        registration, login, JWT issuance
+│   ├── customer-service/    customer profiles
+│   ├── order-service/       orders, pricing, status machine
+│   ├── warehouse-service/   catalogue, warehouses, inventory reservation
+│   ├── delivery-service/    drivers, vehicles, delivery lifecycle
+│   ├── tracking-service/    Redis latest, MongoDB history, SSE
+│   ├── notification-service/ in-app notification centre
+│   └── discovery-server/    optional Eureka registry
+├── frontend/
 │   └── src/
-│       ├── components/ui/     design-system primitives
-│       ├── components/layout/ shell: header, sidebar, bell, theme toggle
-│       ├── components/map/    Leaflet tracking map
-│       ├── layouts/           Admin, Customer and Driver shells
-│       ├── stores/            Pinia stores
-│       ├── services/          typed API clients
-│       └── router/            routes and role guards
+│       ├── components/      ui primitives, layout shells, map
+│       ├── stores/          Pinia: business state
+│       ├── services/        typed API layer, SSE client
+│       ├── views/           admin · customer · driver · auth · shared
+│       └── styles/          design tokens
 ├── infrastructure/
-│   ├── docker/                Dockerfiles, nginx, Postgres bootstrap
-│   ├── kafka/                 topic creation script
-│   └── elk/                   Logstash pipeline and Filebeat config
-├── docs/
-│   ├── CONTRACTS.md           backend implementation contract
-│   └── ui.md                  frontend design and engineering contract
-└── docker-compose.yml         full local platform
+│   ├── docker/              multi-stage Dockerfiles, nginx, Postgres bootstrap
+│   ├── kubernetes/          namespace, config, secrets, per-service manifests, ingress
+│   └── elk/                 Logstash pipeline, Filebeat
+├── docs/                    architecture, api, kafka-events, database, deployment, ui
+├── scripts/verify-e2e.sh    the twenty-step acceptance test
+├── docker-compose.yml
+└── .github/workflows/       ci.yml, frontend.yml
 ```
+
+---
 
 ## Documentation
 
-- [`docs/CONTRACTS.md`](docs/CONTRACTS.md) — backend conventions: error handling, correlation IDs,
-  JWT, Kafka envelopes, idempotency, and the API contract of every service. Read it before changing
-  backend code.
-- [`docs/ui.md`](docs/ui.md) — frontend conventions: design tokens, primitives, layouts, stores and
-  the rules for building a view. Read it before adding a screen.
+| | |
+|---|---|
+| [architecture.md](docs/architecture.md) | Services, the end-to-end flow, cross-cutting concerns, limitations |
+| [api.md](docs/api.md) | Every endpoint, who may call it, status codes, a worked example |
+| [kafka-events.md](docs/kafka-events.md) | Envelope, topology, payloads, consumer obligations |
+| [database.md](docs/database.md) | Conventions, entity diagram, indexes, Mongo and Redis shapes |
+| [deployment.md](docs/deployment.md) | Local, Compose, Kubernetes, environment variables, CI |
+| [ui.md](docs/ui.md) | Design system and the rules the interface is held to |
+| [CONTRACTS.md](docs/CONTRACTS.md) | The internal contract every service implements against |
 
-## License
+---
 
-Private project. All rights reserved.
+## Testing
+
+```bash
+# Backend: unit tests
+mvn -f backend/pom.xml test -DexcludedGroups=integration
+
+# Backend: integration tests (Testcontainers — pulls real Postgres, Kafka, Mongo)
+mvn -f backend/pom.xml test -Dgroups=integration
+
+# Frontend
+cd frontend && npm run lint && npm run typecheck && npm run build
+
+# The whole business flow against a running stack
+./scripts/verify-e2e.sh
+```
+
+Unit tests cover the business rules, not the plumbing: a customer may only cancel before
+delivery processing begins; a reservation that exceeds availability changes nothing and
+reports every shortfall; a partial failure across several order lines rolls back
+completely; an unavailable driver is refused; `DELIVERED -> IN_TRANSIT` is a 409; a
+driver cannot touch another driver's delivery.
+
+Integration tests use Testcontainers against real databases. One of them in
+`fleetflow-common` is a deliberate regression guard: it boots a real Hibernate
+`EntityManagerFactory` with `ddl-auto=validate` against the exact column types the
+migrations write. A drift in the shared `TimestampedEntity` mapping would otherwise fail
+seven services simultaneously at boot, in production, with an obscure message.
+
+---
+
+## Demo credentials
+
+Documented deliberately: they exist so the project can be demonstrated. They are seeded
+only when `SEED_ENABLED=true`, which should be `false` anywhere real.
+
+| Role | Email | Password | Lands on |
+|---|---|---|---|
+| Admin | `admin@fleetflow.local` | `Password123!` | `/admin` |
+| Operations | `operations@fleetflow.local` | `Password123!` | `/admin` |
+| Driver | `driver1@fleetflow.local` … `driver5@fleetflow.local` | `Password123!` | `/driver` |
+| Customer | `customer1@fleetflow.local` … `customer10@fleetflow.local` | `Password123!` | `/customer` |
+
+The seed also creates 20 products, 2 warehouses, 10 customers, 5 drivers, 5 vehicles,
+20 orders, 10 deliveries, notifications and location history — including three
+deliberately low-stock products and one out of stock, so the low-stock badge is visible
+without editing anything.
+
+Driver and vehicle status in the seed is *derived* from which deliveries are open rather
+than listed alongside them, so the demo data cannot drift into looking corrupt.
+
+---
+
+## Running the frontend without Docker
+
+```bash
+cd frontend
+npm install
+npm run dev     # http://localhost:5173, /api proxied to http://localhost:8080
+```
+
+`npm run build` produces a static bundle in `frontend/dist`, which nginx serves in the
+containerised setup. The SPA never calls a service directly: everything goes through the
+gateway, so the browser sees one origin in local development, in Docker and behind the
+Kubernetes Ingress alike.
+
+---
+
+## Three interfaces, on purpose
+
+The driver experience is deliberately not the desktop console with a smaller viewport.
+It is bottom navigation, 56-pixel touch targets, high contrast for sunlight, and a
+status indicator you can read at a glance between stops. The customer app is
+cards-and-checkout. The operations console is dense tables and a full-width map.
+
+They share a design system — one accent colour, 8-point spacing, 1px borders instead of
+shadows, status shown as glyph **and** label so colour is never the only signal — and
+nothing else. A designer would not build three applications; a working operations tool
+with three audiences is a different problem from one audience with one application.
+
+---
+
+## Screenshots
+
+The running application is the demonstration. The screens that matter:
+
+| Screen | Route | What to look at |
+|---|---|---|
+| Operations dashboard | `/admin` | KPI cards from live endpoints, active deliveries, real-data chart |
+| Order detail | `/admin/orders/:id` | Timeline built from the status history, staff actions gated |
+| Inventory | `/admin/inventory` | Low stock visible immediately, filters, adjustment dialog |
+| Live operations map | `/admin/tracking` | Full-width Leaflet map, delivery list, live positions |
+| Customer checkout | `/customer/checkout` | Four explicit steps, cash on delivery |
+| Customer tracking | `/customer/tracking/:id` | Live map over SSE, connection status, timeline |
+| Driver delivery | `/driver/deliveries/:id` | Large status, one primary action, demo simulation |
+
+---
+
+## Known limitations
+
+Named here rather than buried, because a project that hides them is worse than one that
+states them.
+
+* **No service discovery by default.** Explicit URLs; Eureka exists behind a profile.
+* **Service-to-service auth is one shared secret** over `/internal/**`. mTLS or signed
+  tokens is the real answer.
+* **No geocoding.** Addresses are text, so the map cannot show a destination pin, and
+  the demo simulation steps from the last known position rather than pretending to know
+  the route.
+* **One warehouse** serves the MVP. Zone-aware selection across many is the natural next
+  step.
+* **No schema registry.** Payload contracts live in shared code, so a breaking payload
+  change needs consumers redeployed.
+* **Compose and the Kubernetes manifests run single-replica datastores.** The Kubernetes
+  storage declarations are commented out rather than implying durability the demo cannot
+  deliver.
+* **No payment integration.** Cash on delivery, stated as such.
+* **CI builds and tests. It does not deploy** — there is no cluster to deploy to, and
+  claiming otherwise would be dishonest.

@@ -106,6 +106,7 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
@@ -119,14 +120,19 @@ services:
       TZ: UTC
     ports:
       - "${KAFKA_PORT:-29092}:29092"
-    volumes:
-      - kafka-data:/tmp/kraft-combined-logs
+    # No volume on the Kafka log directory. The image runs as uid 1000, while Docker
+    # creates a named volume root-owned, so the broker cannot format its own storage and
+    # dies with "Error while writing meta.properties". The demo broker is therefore
+    # ephemeral on purpose: kafka-init recreates every topic on each `up`, so the stack
+    # is fully reproducible. A production deployment would mount storage the broker
+    # actually owns (a StatefulSet with a volumeClaimTemplate, as in the Kubernetes
+    # manifests here, where emptyDir is created with the pod's ownership).
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
       timeout: 10s
       retries: 15
-      start_period: 30s
+      start_period: 40s
     networks: [fleetflow-net]
     logging: *local-logging
 
@@ -502,7 +508,6 @@ volumes:
   postgres-data:
   mongodb-data:
   redis-data:
-  kafka-data:
   elasticsearch-data:
   logstash-data:
   filebeat-data:

@@ -124,4 +124,4 @@ logging:
   level:
     com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}
     org.apache.kafka.clients.NetworkClient: ERROR
-org.apache.kafka.clients.admin.AdminClientConfig: ERROR
+    org.apache.kafka.clients.admin.AdminClientConfig: ERROR

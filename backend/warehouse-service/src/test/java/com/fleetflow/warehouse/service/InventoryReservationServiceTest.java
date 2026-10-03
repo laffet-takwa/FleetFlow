@@ -82,9 +82,6 @@ class InventoryReservationServiceTest {
                 eventPublisher);
 
         when(warehouseService.getById(WAREHOUSE_ID)).thenReturn(warehouse());
-        when(inventoryRepository.save(any(Inventory.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        when(reservationRepository.save(any(InventoryReservation.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     // ------------------------------------------------------------- happy path
@@ -99,6 +96,7 @@ class InventoryReservationServiceTest {
 
         givenOrder(List.of(new OrderLine(1L, 3), new OrderLine(2L, 2)), milk, coffee);
         givenStock(milkStock, coffeeStock);
+        givenSavingReservations();
 
         reservationService.reserve(orderCreated());
 
@@ -122,7 +120,7 @@ class InventoryReservationServiceTest {
         assertEquals(WAREHOUSE_ID, payload.warehouseId());
         assertEquals("Tunis Centre Warehouse", payload.warehouseName());
         assertEquals(5, payload.itemCount(), "itemCount is the total number of units");
-        assertEquals(new BigDecimal("50.500"), payload.reservedValue(), "3 x 8.500 + 2 x 12.750");
+        assertEquals(new BigDecimal("51.000"), payload.reservedValue(), "3 x 8.500 + 2 x 12.750");
         verify(eventPublisher, never()).publish(eq(TOPIC_INSUFFICIENT), any(), any());
     }
 
@@ -140,8 +138,7 @@ class InventoryReservationServiceTest {
         assertEquals(2, milkStock.getAvailableQuantity(), "available is untouched");
         assertEquals(1, milkStock.getReservedQuantity(), "reserved is untouched");
 
-        InventoryInsufficientPayload payload =
-                capturedEvent.<InventoryInsufficientPayload>(TOPIC_INSUFFICIENT).payload();
+        InventoryInsufficientPayload payload = insufficientPayload();
         assertEquals(ORDER_ID, payload.orderId());
         assertEquals(CUSTOMER_ID, payload.customerId());
         assertEquals(1, payload.shortfalls().size());
@@ -174,8 +171,7 @@ class InventoryReservationServiceTest {
         assertEquals(1, thinStock.getAvailableQuantity());
         assertEquals(0, emptyStock.getAvailableQuantity());
 
-        InventoryInsufficientPayload payload =
-                capturedEvent.<InventoryInsufficientPayload>(TOPIC_INSUFFICIENT).payload();
+        InventoryInsufficientPayload payload = insufficientPayload();
         assertEquals(2, payload.shortfalls().size(), "both unfulfillable lines are reported, not just the first");
         assertEquals(List.of(2L, 3L), payload.shortfalls().stream().map(Shortfall::productId).toList());
         assertEquals(new Shortfall(2L, "Cafe moulu Arabe 250g", 5, 1), payload.shortfalls().get(0));
@@ -195,8 +191,7 @@ class InventoryReservationServiceTest {
 
         reservationService.reserve(orderCreated());
 
-        InventoryInsufficientPayload payload =
-                capturedEvent.<InventoryInsufficientPayload>(TOPIC_INSUFFICIENT).payload();
+        InventoryInsufficientPayload payload = insufficientPayload();
         assertEquals(1, payload.shortfalls().size());
         assertEquals(404L, payload.shortfalls().get(0).productId());
         assertEquals(0, payload.shortfalls().get(0).available());
@@ -213,9 +208,12 @@ class InventoryReservationServiceTest {
         Product milk = product(1L, "FF-GR-0002", "Carton 6 x Brik UHT 1L", "8.500");
         Inventory milkStock = stock(milk, 40, 0);
 
-        when(reservationRepository.existsByOrderId(ORDER_ID)).thenReturn(false, true);
         givenOrder(List.of(new OrderLine(1L, 3)), milk);
         givenStock(milkStock);
+        givenSavingReservations();
+        // Re-stubbed after givenOrder: the reservation probe is what makes the second
+        // attempt a no-op, so it has to answer false once and then true.
+        when(reservationRepository.existsByOrderId(ORDER_ID)).thenReturn(false, true);
 
         reservationService.reserve(orderCreated());
         assertEquals(37, milkStock.getAvailableQuantity());
@@ -230,6 +228,12 @@ class InventoryReservationServiceTest {
     }
 
     // ----------------------------------------------------------------- helpers
+
+    private void givenSavingReservations() {
+        when(inventoryRepository.save(any(Inventory.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(reservationRepository.save(any(InventoryReservation.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+    }
 
     private void givenOrder(List<OrderLine> lines, Product... products) {
         when(reservationRepository.existsByOrderId(ORDER_ID)).thenReturn(false);
@@ -253,6 +257,11 @@ class InventoryReservationServiceTest {
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
         verify(eventPublisher).publish(eq(topic), key.capture(), any());
         return key.getValue();
+    }
+
+    private InventoryInsufficientPayload insufficientPayload() {
+        EventEnvelope<InventoryInsufficientPayload> published = capturedEvent(TOPIC_INSUFFICIENT);
+        return published.payload();
     }
 
     private static OrderCreatedPayload orderCreated() {

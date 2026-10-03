@@ -112,6 +112,6 @@ logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %5p [%X{correlationId:-no-correlation-id}] %-42.42logger{39} : %m%n"
   level:
-com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}
+    com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}
     org.apache.kafka.clients.NetworkClient: ERROR
     org.apache.kafka.clients.admin.AdminClientConfig: ERROR

@@ -85,8 +85,10 @@ class OrderLifecycleServiceTest {
     void assignedStartsProcessing() {
         Order order = given(OrderStatus.CONFIRMED);
 
+        // driverId is the Delivery Service's local key, driverUserId the platform identity.
+        // The Order Service only reads the id and the name, but both must be present.
         lifecycleService.onDeliveryAssigned(new DeliveryAssignedPayload(
-                DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, "Karim Chaabane", 2L, "TN-1234-TN"));
+                DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, "Karim Chaabane", 2L, "TN-1234-TN"));
 
         assertEquals(DELIVERY_ID, order.getDeliveryId());
         assertEquals(OrderStatus.PROCESSING, order.getStatus());
@@ -115,7 +117,7 @@ class OrderLifecycleServiceTest {
         Order order = given(OrderStatus.OUT_FOR_DELIVERY);
 
         lifecycleService.onDeliveryCompleted(new DeliveryCompletedPayload(
-                DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, Instant.parse("2026-09-30T11:00:00Z"),
+                DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, Instant.parse("2026-09-30T11:00:00Z"),
                 "Signed by concierge"));
 
         assertEquals(OrderStatus.DELIVERED, order.getStatus());
@@ -228,7 +230,8 @@ class OrderLifecycleServiceTest {
     }
 
     private static DeliveryStatusChangedPayload statusChanged(String newStatus, String reason) {
-        return new DeliveryStatusChangedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, "ASSIGNED", newStatus, reason);
+        return new DeliveryStatusChangedPayload(
+            DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, "ASSIGNED", newStatus, reason);
     }
 
     private record HistoryRow(OrderStatus status, OrderStatus previousStatus, StatusSource source, String note) {

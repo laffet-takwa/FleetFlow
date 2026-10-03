@@ -5,8 +5,10 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -22,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fleetflow.common.api.ApiErrorResponse;
 import com.fleetflow.common.correlation.CorrelationId;
 import com.fleetflow.common.exception.ErrorCode;
+import com.fleetflow.common.security.InternalServiceAuthFilter;
 import com.fleetflow.common.security.JwtAuthenticationFilter;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -60,6 +63,27 @@ public class SecurityConfig {
                         write(request, response, ErrorCode.FORBIDDEN, ex.getMessage())))
             .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
         return http.build();
+    }
+
+    /**
+     * Overrides the registration the shared kernel supplies, because that one maps the
+     * filter to the servlet pattern {@code /internal/**}. The Servlet specification has
+     * no prefix-match syntax there, so Tomcat logs "Suspicious URL pattern" and then never
+     * runs the filter, which leaves {@code /internal/**} reachable with no token at all.
+     *
+     * <p>Matching every path instead is safe: {@link InternalServiceAuthFilter#shouldNotFilter}
+     * narrows the work to the configured prefix, so this only changes which URLs are
+     * considered, not what is enforced. The bean name is the auto-configuration's
+     * {@code @ConditionalOnMissingBean} key, which is what makes the kernel stand down.
+     */
+    @Bean(name = "internalServiceAuthFilterRegistration")
+    FilterRegistrationBean<InternalServiceAuthFilter> internalServiceAuthFilterRegistration(
+            InternalServiceAuthFilter filter) {
+
+        FilterRegistrationBean<InternalServiceAuthFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 1);
+        registration.addUrlPatterns("/*");
+        return registration;
     }
 
     /**

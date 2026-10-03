@@ -152,7 +152,7 @@ class NotificationEventListenerTest {
     @Test
     void deliveryAssignedNotifiesTheCustomerAndTheOperationsDesk() throws Exception {
         listener.onDeliveryAssigned(json(EventTypes.DELIVERY_ASSIGNED, "delivery.assigned",
-                new DeliveryAssignedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, "Karim Ben Ali", 2L,
+                new DeliveryAssignedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, "Karim Ben Ali", 2L,
                         "123 Tunis 4521")));
 
         ArgumentCaptor<Notification> stored = ArgumentCaptor.forClass(Notification.class);
@@ -180,7 +180,7 @@ class NotificationEventListenerTest {
     @Test
     void theOperationsDeskIsNotNotifiedTwiceWhenItIsTheCustomer() throws Exception {
         listener.onDeliveryAssigned(json(EventTypes.DELIVERY_ASSIGNED, "delivery.assigned",
-                new DeliveryAssignedPayload(DELIVERY_ID, ORDER_ID, 2L, 3L, "Karim Ben Ali", 2L, "123 Tunis 4521")));
+                new DeliveryAssignedPayload(DELIVERY_ID, ORDER_ID, 2L, 3L, 33L, "Karim Ben Ali", 2L, "123 Tunis 4521")));
 
         Notification stored = singleStoredNotification();
         assertThat(stored.getUserId()).isEqualTo(2L);
@@ -203,7 +203,7 @@ class NotificationEventListenerTest {
     @Test
     void deliveryCompletedThanksTheCustomer() throws Exception {
         listener.onDeliveryCompleted(json(EventTypes.DELIVERY_COMPLETED, "delivery.completed",
-                new DeliveryCompletedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, Instant.now(), "left with concierge")));
+                new DeliveryCompletedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, Instant.now(), "left with concierge")));
 
         Notification stored = singleStoredNotification();
         assertThat(stored.getType()).isEqualTo(NotificationType.DELIVERY_COMPLETED);
@@ -279,7 +279,7 @@ class NotificationEventListenerTest {
     }
 
     private static DeliveryStatusChangedPayload deliveryStatusChanged(String previous, String next, String reason) {
-        return new DeliveryStatusChangedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, previous, next, reason);
+        return new DeliveryStatusChangedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, previous, next, reason);
     }
 
     private String json(String eventType, String topic, Object payload) throws Exception {

@@ -1,11 +1,17 @@
 package com.fleetflow.customer.controller;
 
+import jakarta.validation.Valid;
+
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.fleetflow.customer.dto.CustomerContactResponse;
+import com.fleetflow.customer.dto.CustomerProfilePreCreateRequest;
+import com.fleetflow.customer.dto.CustomerResponse;
 import com.fleetflow.customer.mapper.CustomerMapper;
 import com.fleetflow.customer.service.CustomerService;
 
@@ -43,5 +49,18 @@ public class InternalCustomerController {
             @Parameter(description = "auth-service user id, not the customer row id", schema = @Schema(example = "8"))
             @PathVariable Long userId) {
         return mapper.toContactResponse(customerService.getContactByUserId(userId));
+    }
+
+    @PostMapping
+    @Operation(summary = "Pre-create a customer profile from registration details",
+            description = """
+                    Called by the auth service straight after an account is registered, so the name,
+                    phone and address captured at registration are preserved. Idempotent by userId:
+                    a repeat call updates the existing profile rather than creating a second one.
+                    """)
+    @ApiResponse(responseCode = "201", description = "Profile created",
+            content = @Content(schema = @Schema(implementation = CustomerResponse.class)))
+    public CustomerResponse preCreate(@Valid @RequestBody CustomerProfilePreCreateRequest request) {
+        return mapper.toResponse(customerService.preCreate(request));
     }
 }

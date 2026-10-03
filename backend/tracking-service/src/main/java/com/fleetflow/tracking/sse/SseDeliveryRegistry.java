@@ -149,15 +149,28 @@ public class SseDeliveryRegistry {
 
     private void write(long deliveryId, SseEmitter emitter, String eventName, LocationResponse location) {
         try {
+            // The event id is optional decoration: a client that has already been sent the
+            // payload does not need it, so a missing timestamp must not cost the whole
+            // position. Falling back to receivedAt keeps the id stable and never null.
+            String timestamp = Long.toString(location.recordedAt() != null
+                    ? location.recordedAt().toEpochMilli()
+                    : (location.receivedAt() == null ? 0L : location.receivedAt().toEpochMilli()));
             emitter.send(SseEmitter.event()
                     .name(eventName)
-                    .id("loc-" + deliveryId + "-" + location.recordedAt().toEpochMilli())
+                    .id("loc-" + deliveryId + "-" + timestamp)
                     .data(location, MediaType.APPLICATION_JSON));
         } catch (IOException | IllegalStateException ex) {
             // IllegalStateException means the stream was already completed, IOException that
             // the browser is gone: either way this emitter is dead, so stop writing to it.
             log.debug("Dropping the stream of delivery {} after a failed {} event: {}", deliveryId, eventName,
                     ex.getMessage());
+            unregister(deliveryId, emitter);
+        } catch (RuntimeException ex) {
+            // Never let a delivery-side failure propagate into the ingestion path: the point
+            // is already persisted and cached, and turning a fan-out problem into a 500
+            // would tell the driver their report was lost when it was not.
+            log.warn("Could not send a {} event for delivery {} to one subscriber: {}",
+                    eventName, deliveryId, ex.getMessage());
             unregister(deliveryId, emitter);
         }
     }

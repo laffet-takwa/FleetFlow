@@ -17,6 +17,7 @@ import com.fleetflow.common.exception.ResourceNotFoundException;
 import com.fleetflow.common.security.JwtPrincipal;
 import com.fleetflow.common.security.SecurityUtils;
 
+import com.fleetflow.customer.dto.CustomerProfilePreCreateRequest;
 import com.fleetflow.customer.dto.UpdateProfileRequest;
 import com.fleetflow.customer.entity.Customer;
 import com.fleetflow.customer.repository.CustomerRepository;
@@ -46,6 +47,39 @@ public class CustomerService {
         JwtPrincipal principal = SecurityUtils.requirePrincipal();
         return repository.findByUserId(principal.userId())
                 .orElseGet(() -> provisionSkeleton(principal));
+    }
+
+    /**
+     * Creates the profile from the details captured at registration.
+     *
+     * <p>Called by the auth service immediately after an account is created, so that the
+     * name, phone and address supplied during registration are not lost. Lazy
+     * provisioning on {@code /api/customers/me} cannot do this: by the time a browser
+     * first calls that endpoint the registration payload is gone, and a skeleton with
+     * empty names is what the driver would see at the door.
+     *
+     * <p>Idempotent by {@code userId}: a repeat call updates the existing profile rather
+     * than creating a second one, so a retried registration cannot duplicate it.
+     */
+    @Transactional
+    public Customer preCreate(CustomerProfilePreCreateRequest request) {
+        Customer customer = repository.findByUserId(request.userId())
+                .orElseGet(() -> {
+                    Customer created = new Customer();
+                    created.setUserId(request.userId());
+                    return created;
+                });
+
+        customer.setFirstName(request.firstName());
+        customer.setLastName(request.lastName());
+        customer.setEmail(request.email());
+        customer.setPhone(request.phone());
+        customer.setAddress(request.address());
+
+        Customer saved = repository.saveAndFlush(customer);
+        log.info("Pre-created customer profile {} for userId={} [correlationId={}]",
+                saved.getId(), saved.getUserId(), CorrelationId.getOrCreate());
+        return saved;
     }
 
     private Customer provisionSkeleton(JwtPrincipal principal) {

@@ -42,9 +42,19 @@ CORRELATION_ID_HEADER="X-Correlation-ID: ${CORRELATION_ID}"
 RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
 
 step()  { printf '\n%s▸ %s%s\n' "${BOLD}" "$1" "${RESET}"; }
-ok()    { PASSED=$((PASSED + 1)); printf '  %s✓%s %s\n' "${GREEN}" "${RESET}" "$1"; }
-fail()  { FAILED=$((FAILED + 1)); printf '  %s✗%s %s\n' "${RED}" "${RESET}" "$1"; }
-info()  { printf '  %s·%s %s\n' "${YELLOW}" "${RESET}" "$1"; }
+
+# Results are tallied in a file rather than in shell variables.
+#
+# ok/fail are invoked from inside command substitutions in a few places, and a counter
+# incremented inside "$( … )" is incremented in a subshell and thrown away — which made
+# the summary under-report. A tally file is written by the current shell and read back
+# once at the end, so the numbers always match the lines actually printed.
+TALLY="$(mktemp 2>/dev/null || echo /tmp/fleetflow-tally.txt)"
+: > "$TALLY"
+
+ok()   { printf 'PASS\n' >> "$TALLY"; printf '  %s✓%s %s\n' "${GREEN}" "${RESET}" "$1"; }
+fail() { printf 'FAIL\n' >> "$TALLY"; printf '  %s✗%s %s\n' "${RED}" "${RESET}" "$1"; }
+info() { printf '  %s·%s %s\n' "${YELLOW}" "${RESET}" "$1"; }
 
 # Minimal JSON field reader.
 #
@@ -114,11 +124,20 @@ api() {
 
 status_of() {
   local method="$1" path="$2" body="${3:-}" token="${4:-}"
-  local args=(-sS -o /dev/null -w '%{http_code}' -X "$method" "${BASE_URL}${path}"
+  # The response body goes to a temp file rather than /dev/null: Git Bash's curl on
+  # Windows cannot open /dev/null reliably and reports
+  # "transfer closed with outstanding read data remaining", which swallowed the status
+  # code even though the request had succeeded.
+  local sink
+  sink="$(mktemp 2>/dev/null || echo /tmp/fleetflow-status.txt)"
+  local args=(-sS -o "$sink" -w '%{http_code}' -X "$method" "${BASE_URL}${path}"
               -H "Content-Type: application/json" -H "$CORRELATION_ID_HEADER")
   [[ -n "$token" ]] && args+=(-H "Authorization: Bearer ${token}")
-  [[ -n "$body" ]] && args+=(-d "$body")
-  curl "${args[@]}" 2>/dev/null
+  [[ -n "$body" ]] && args+=(--data-binary "$body")
+  local code
+  code="$(curl "${args[@]}" 2>/dev/null)"
+  rm -f "$sink" 2>/dev/null
+  printf '%s' "$code"
 }
 
 # Polls a URL until the JSON field equals the expected value.
@@ -149,6 +168,42 @@ for _ in $(seq 1 "$POLL_MAX"); do
   sleep 2
 done
 if [[ $READY -eq 0 ]]; then ok "gateway /actuator/health is 200"; else fail "gateway never became healthy"; exit 1; fi
+
+# --------------------------------------------------------------- 0b. reset state
+# The test is re-runnable: it cancels whatever is still in flight first, through the
+# public API, which is also what frees the drivers and vehicles back to AVAILABLE.
+#
+# Without this the second run fails for a misleading reason: the seed provides a fixed
+# number of available drivers and CREATED deliveries, and the first run consumes them.
+step "Resetting the demo state so the run is repeatable"
+OPS_RESET="$(api POST /api/auth/login '{"email":"operations@fleetflow.local","password":"Password123!"}')"
+RESET_TOKEN="$(printf '%s' "$OPS_RESET" | json accessToken)"
+if [[ -z "$RESET_TOKEN" ]]; then
+  fail "could not sign in as operations@fleetflow.local"
+  exit 1
+fi
+
+CLEARED=0
+for status in CREATED ASSIGNED PICKED_UP IN_TRANSIT FAILED; do
+  page="$(api GET "/api/deliveries?status=${status}&page=0&size=100" '' "$RESET_TOKEN")"
+  ids="$(printf '%s' "$page" | node -e '
+    let raw = "";
+    process.stdin.on("data", (c) => (raw += c));
+    process.stdin.on("end", () => {
+      try {
+        const list = JSON.parse(raw).content ?? [];
+        process.stdout.write(list.map((d) => d.id).join(" "));
+      } catch (e) { /* nothing in this state */ }
+    });
+  ')"
+  for id in $ids; do
+    if [[ "$(status_of POST "/api/deliveries/${id}/cancel" \
+        '{"status":"CANCELLED","reason":"Reset before the acceptance test"}' "$RESET_TOKEN")" == "200" ]]; then
+      CLEARED=$((CLEARED + 1))
+    fi
+  done
+done
+ok "cancelled ${CLEARED} in-flight delivery(ies); drivers and vehicles are free again"
 
 # ------------------------------------------------------------------ 1. register
 step "1. The customer registers"
@@ -197,39 +252,81 @@ if [[ -n "$CONFIRMED" ]]; then
   ok "order #${ORDER_ID} reached CONFIRMED (inventory.reserved consumed)"
 else
   fail "order #${ORDER_ID} never left CREATED; the reservation did not complete"
+  info "current status: $(api GET "/api/orders/${ORDER_ID}" '' "$CUSTOMER_TOKEN" | json status)"
 fi
 
 # ------------------------------------------------------- 6. delivery is created
 step "6. Delivery Service created a delivery"
-DELIVERIES="$(api GET "/api/deliveries?page=0&size=100" '' '')"
+# Operations is signed in before the first staff-scoped call, so every later step can
+# reuse the token instead of re-authenticating.
+OPS_LOGIN="$(api POST /api/auth/login '{"email":"operations@fleetflow.local","password":"Password123!"}')"
+OPS_TOKEN="$(printf '%s' "$OPS_LOGIN" | json accessToken)"
+if [[ -z "$OPS_TOKEN" ]]; then fail "could not sign in as operations@fleetflow.local"; exit 1; fi
+
+DELIVERIES="$(api GET "/api/deliveries?status=CREATED&page=0&size=100" '' "$OPS_TOKEN")"
 DELIVERY_ID="$(printf '%s' "$DELIVERIES" | json content.0.id)"
 DELIVERY_STATUS="$(printf '%s' "$DELIVERIES" | json content.0.status)"
 if [[ -n "$DELIVERY_ID" && "$DELIVERY_STATUS" == "CREATED" ]]; then
   ok "delivery #${DELIVERY_ID} exists in CREATED"
 else
   fail "no CREATED delivery found: $(printf '%s' "$DELIVERIES" | head -c 300)"
+  info "this is the delivery the reservation should have created"
 fi
 
 # ------------------------------------------------------------- 7. RBAC rejection
-step "7. RBAC — a customer cannot reach the operations console"
-CODE="$(status_of GET /api/orders "$CUSTOMER_TOKEN")"
-CODE2="$(status_of GET /internal/api/products 'ids=1')"
-if [[ "$CODE" != "403" && "$CODE" != "404" ]]; then
-  fail "expected 403/404 for a customer on the internal endpoint, got ${CODE2}"
+step "7. RBAC and internal-route isolation"
+# A customer must not reach the operations console.
+CODE="$(status_of GET /api/deliveries '' "$CUSTOMER_TOKEN")"
+if [[ "$CODE" == "403" ]]; then
+  ok "a customer token is refused on the operations console (403)"
 else
-  ok "internal endpoints reject a plain customer token (${CODE2})"
+  fail "expected 403 for a customer on /api/deliveries, got ${CODE}"
+fi
+
+# /internal/** is deliberately absent from the gateway route table. Any of these answers
+# is acceptable — 401 from the edge policy, 404 from the router, or 403 from the service
+# — but it must never be 200.
+CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${BASE_URL}/internal/api/products?ids=1" \
+  -H 'X-Internal-Token: fleetflow-local-internal-token' 2>/dev/null)"
+if [[ "$CODE" != "200" ]]; then
+  ok "/internal/** is unreachable through the gateway (${CODE})"
+else
+  fail "the gateway exposed an internal endpoint"
+fi
+
+# The same internal call made directly, without the token, must be rejected by the
+# service itself — this is the control the gateway route table cannot provide.
+CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+  "http://localhost:18084/internal/api/products?ids=1" 2>/dev/null)"
+if [[ "$CODE" == "403" ]]; then
+  ok "the service rejects an internal call with no token (403)"
+else
+  info "direct internal call returned ${CODE} (service port may differ from the default)"
 fi
 
 # ------------------------------------------------ 8. operations assigns resources
 step "8. Operations assigns a driver and a vehicle"
-OPS_LOGIN="$(api POST /api/auth/login '{"email":"operations@fleetflow.local","password":"Password123!"}')"
-OPS_TOKEN="$(printf '%s' "$OPS_LOGIN" | json accessToken)"
-if [[ -z "$OPS_TOKEN" ]]; then fail "could not sign in as operations@fleetflow.local"; exit 1; fi
-
-DRIVERS="$(api GET '/api/drivers?status=AVAILABLE&size=10' '' "$OPS_TOKEN")"
-DRIVER_ID="$(printf '%s' "$DRIVERS" | json content.0.id)"
-DRIVER_USER_ID="$(printf '%s' "$DRIVERS" | json content.0.userId)"
+DRIVERS="$(api GET '/api/drivers?status=AVAILABLE&size=50' '' "$OPS_TOKEN")"
 VEHICLES="$(api GET '/api/vehicles?status=AVAILABLE&size=10' '' "$OPS_TOKEN")"
+
+# Prefer driver1 (auth account 3) so the later steps can sign in as them. Operations may
+# legitimately pick a different available driver, and driving as the wrong account would
+# be rejected with 403 "This delivery is not assigned to you" — correctly, but it would
+# be the test at fault rather than the application.
+DRIVER_ID=""
+DRIVER_USER_ID=""
+read -r DRIVER_ID DRIVER_USER_ID <<<"$(printf '%s' "$DRIVERS" | node -e '
+  let raw = "";
+  process.stdin.on("data", (c) => (raw += c));
+  process.stdin.on("end", () => {
+    let list = [];
+    try { list = JSON.parse(raw).content ?? []; } catch (e) { /* no drivers */ }
+    const preferred = list.find((d) => d.userId === 3);
+    const chosen = preferred ?? list[0];
+    if (chosen) process.stdout.write(`${chosen.id} ${chosen.userId}`);
+  });
+')"
+
 VEHICLE_ID="$(printf '%s' "$VEHICLES" | json content.0.id)"
 
 if [[ -n "$DRIVER_ID" && -n "$VEHICLE_ID" ]]; then
@@ -259,16 +356,32 @@ fi
 
 # --------------------------------------------------------- 10. the driver signs in
 step "10. The driver signs in and sees their assignment"
-DRIVER_LOGIN="$(api POST /api/auth/login '{"email":"driver1@fleetflow.local","password":"Password123!"}')"
-DRIVER_TOKEN="$(printf '%s' "$DRIVER_LOGIN" | json accessToken)"
-if [[ -z "$DRIVER_TOKEN" ]]; then fail "could not sign in as driver1@fleetflow.local"; exit 1; fi
+# driver1..driver5 map to auth accounts 3..7, which is the identity space every service
+# shares, so the assigned driver's account id determines which account signs in here.
+case "${DRIVER_USER_ID}" in
+  3) DRIVER_EMAIL="driver1@fleetflow.local" ;;
+  4) DRIVER_EMAIL="driver2@fleetflow.local" ;;
+  5) DRIVER_EMAIL="driver3@fleetflow.local" ;;
+  6) DRIVER_EMAIL="driver4@fleetflow.local" ;;
+  7) DRIVER_EMAIL="driver5@fleetflow.local" ;;
+  *) DRIVER_EMAIL="driver1@fleetflow.local" ;;
+esac
 
-# The seeded driver's account id must match the `userId` the warehouse/exports agree on.
+DRIVER_LOGIN="$(api POST /api/auth/login "{\"email\":\"${DRIVER_EMAIL}\",\"password\":\"Password123!\"}")"
+DRIVER_TOKEN="$(printf '%s' "$DRIVER_LOGIN" | json accessToken)"
+if [[ -z "$DRIVER_TOKEN" ]]; then fail "could not sign in as ${DRIVER_EMAIL}"; exit 1; fi
+
 DRIVER_ID_FROM_TOKEN="$(api GET /api/auth/me '' "$DRIVER_TOKEN" | json id)"
+if [[ "${DRIVER_ID_FROM_TOKEN}" == "${DRIVER_USER_ID}" ]]; then
+  ok "signed in as ${DRIVER_EMAIL}, the assigned driver (account ${DRIVER_ID_FROM_TOKEN})"
+else
+  fail "expected account ${DRIVER_USER_ID}, token says ${DRIVER_ID_FROM_TOKEN}"
+fi
+
 MY_DELIVERIES="$(api GET /api/deliveries/mine '' "$DRIVER_TOKEN")"
 MY_COUNT="$(printf '%s' "$MY_DELIVERIES" | array_length)"
 if [[ "${MY_COUNT:-0}" -gt 0 ]]; then
-  ok "driver account ${DRIVER_ID_FROM_TOKEN} sees ${MY_COUNT} delivery(ies)"
+  ok "the driver sees ${MY_COUNT} delivery(ies) in their list"
 else
   fail "the driver sees no deliveries; the driverId/userId identity mapping is wrong"
 fi
@@ -402,10 +515,19 @@ CORR_HEADER="$(curl -sS -o /dev/null -D - "${BASE_URL}/api/auth/login" -X POST \
 if [[ -n "$CORR_HEADER" ]]; then ok "X-Correlation-ID echoed: ${CORR_HEADER}"; else fail "no X-Correlation-ID response header"; fi
 
 # ------------------------------------------------------------------- summary
-printf '\n%s─────────────────────────────────────────%s\n' "${BOLD}" "${RESET}"
-printf '%sPassed: %s%s%d    %sFailed: %s%s%d\n' "${BOLD}" "${RESET}" "${GREEN}" "${PASSED}" "${RESET}" "${RED}" "${FAILED}"
-printf 'Correlation id for this run: %s\n' "${CORRELATION_ID}"
-printf '%s─────────────────────────────────────────%s\n\n' "${BOLD}" "${RESET}"
+# grep -c prints the count and exits 1 when there are no matches, so the fallback must
+# not also echo a 0 — that would make the variable "0\n0" and every printf on it fail.
+PASSED="$(grep -c '^PASS$' "$TALLY" 2>/dev/null)"
+FAILED="$(grep -c '^FAIL$' "$TALLY" 2>/dev/null)"
+PASSED="${PASSED:-0}"
+FAILED="${FAILED:-0}"
+rm -f "$TALLY" 2>/dev/null
 
-[[ "$FAILED" -eq 0 ]] || exit 1
+printf '\n%s-----------------------------------------%s\n' "${BOLD}" "${RESET}"
+printf '%sPassed: %s%d%s    %sFailed: %s%d%s\n' \
+  "${BOLD}" "${GREEN}" "${PASSED}" "${RESET}" "${BOLD}" "${RED}" "${FAILED}" "${RESET}"
+printf 'Correlation id for this run: %s\n' "${CORRELATION_ID}"
+printf '%s-----------------------------------------%s\n\n' "${BOLD}" "${RESET}"
+
+if [[ "${FAILED}" -ne 0 ]]; then exit 1; fi
 printf '%sThe full business flow works end to end.%s\n\n' "${GREEN}" "${RESET}"

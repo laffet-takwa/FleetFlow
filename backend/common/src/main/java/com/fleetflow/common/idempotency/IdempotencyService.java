@@ -27,7 +27,11 @@ public class IdempotencyService {
     private static final String INSERT_SQL =
             "INSERT INTO processed_event (event_id, event_type, processed_at) VALUES (?, ?, ?) "
                     + "ON CONFLICT (event_id) DO NOTHING";
-    private static final String EXISTS_SQL = "SELECT 1 FROM processed_event WHERE event_id = ?";
+    // COUNT(*) rather than EXISTS or a bare "SELECT 1": JdbcTemplate.queryForObject
+    // throws EmptyResultDataAccessException when a query returns no rows, so an EXISTS
+    // check would blow up on the very first event a consumer sees — which is every
+    // consumer, and would block the whole event flow.
+    private static final String COUNT_SQL = "SELECT COUNT(*) FROM processed_event WHERE event_id = ?";
     private static final String DELETE_SQL = "DELETE FROM processed_event WHERE processed_at < ?";
 
     private final JdbcTemplate jdbcTemplate;
@@ -43,8 +47,8 @@ public class IdempotencyService {
     }
 
     public boolean wasProcessed(String eventId) {
-        Integer found = jdbcTemplate.queryForObject(EXISTS_SQL, Integer.class, eventId);
-        return found != null;
+        Integer count = jdbcTemplate.queryForObject(COUNT_SQL, Integer.class, eventId);
+        return count != null && count > 0;
     }
 
     /** @return {@code true} the first time this event id is recorded. */

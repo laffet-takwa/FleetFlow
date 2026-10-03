@@ -168,6 +168,10 @@ services:
       SERVER_PORT: "8081"
       DB_NAME: fleetflow_auth
       DB_USERNAME: fleetflow_auth
+      # Registration hands the new account's details to customer-service so the
+      # profile is not lost. Without this the client falls back to localhost, which
+      # inside a container is the auth service itself, and the call is refused.
+      CUSTOMER_SERVICE_URL: http://customer-service:8082
     ports:
       - "${AUTH_PORT:-8081}:8081"
     depends_on:

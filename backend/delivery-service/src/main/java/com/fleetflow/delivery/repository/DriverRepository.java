@@ -19,10 +19,17 @@ public interface DriverRepository extends JpaRepository<Driver, Long> {
 
     long countByStatus(DriverStatus status);
 
+    /**
+     * The search term is compared through {@code coalesce(:search, '') = ''} rather than
+     * {@code :search is null}. A nullable String parameter whose only other use is
+     * {@code concat} gives Hibernate no JDBC type to infer, so it binds {@code bytea} and
+     * Postgres rejects the query with "function lower(bytea) does not exist" — which
+     * fails on the common no-search case, not just when a search term is supplied.
+     */
     @Query("""
             select d from Driver d
             where (:status is null or d.status = :status)
-              and (:search is null
+              and (coalesce(:search, '') = ''
                    or lower(d.fullName) like lower(concat('%', :search, '%'))
                    or lower(d.licenseNumber) like lower(concat('%', :search, '%'))
                    or d.phone like concat('%', :search, '%'))

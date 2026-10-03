@@ -23,8 +23,12 @@ spring:
       # read-only, so a RemoveRequestHeader default makes every routed request fail
       # with UnsupportedOperationException.
       httpclient:
+        # Only the connect handshake is bounded. A response timeout would cut off the
+        # Server-Sent Event streams, which are long-lived by design: a 30s cap killed
+        # the live tracking stream mid-delivery with a 504 after the first batch of
+        # positions had already been delivered.
         connect-timeout: 5000
-        response-timeout: 30s
+        response-timeout: 3600s
         pool:
           max-connections: 200
       routes:

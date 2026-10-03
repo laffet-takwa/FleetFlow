@@ -68,7 +68,15 @@ public class LocationIngestionService {
         requireTrackable(state);
         requireCoordinates(request);
         requireAuthorised(state, authenticatedUserId, staffCaller);
-        requireInOrder(state, request.recordedAt());
+
+        // recordedAt is optional in the request: a driver posting from a browser or a
+        // simple integration may omit it. It is defaulted to arrival time here, because
+        // a null would otherwise propagate into the stored document, into the Redis
+        // read model and into the SSE payload, where it surfaces as a NullPointerException
+        // *after* the point has already been persisted — turning a successful write into
+        // a 500 while still leaving the data in place.
+        Instant recordedAt = request.recordedAt() == null ? clock.instant() : request.recordedAt();
+        requireInOrder(state, recordedAt);
 
         Instant receivedAt = clock.instant();
         LocationHistory history = new LocationHistory();
@@ -79,20 +87,20 @@ public class LocationIngestionService {
         history.setLongitude(request.longitude());
         history.setSpeedKph(request.speedKph());
         history.setHeading(request.heading());
-        history.setRecordedAt(request.recordedAt());
+        history.setRecordedAt(recordedAt);
         history.setReceivedAt(receivedAt);
         mongoTemplate.save(history);
 
         state.setLocationCount(state.getLocationCount() + 1);
-        state.setLastLocationAt(request.recordedAt());
+        state.setLastLocationAt(recordedAt);
         mongoTemplate.save(state);
 
-        LocationResponse location = toResponse(state, request, receivedAt);
+        LocationResponse location = toResponse(state, request, receivedAt, recordedAt);
         latestLocationStore.put(location);
         sseDeliveryRegistry.broadcast(state.getDeliveryId(), location);
 
         log.info("Stored position {} for delivery {} by driver {} [correlationId={}]",
-                request.recordedAt(), state.getDeliveryId(), state.getDriverId(), CorrelationId.getOrCreate());
+                recordedAt, state.getDeliveryId(), state.getDriverId(), CorrelationId.getOrCreate());
         return location;
     }
 
@@ -145,7 +153,7 @@ public class LocationIngestionService {
     }
 
     private LocationResponse toResponse(DeliveryTrackingState state, LocationUpdateRequest request,
-            Instant receivedAt) {
+            Instant receivedAt, Instant recordedAt) {
         return new LocationResponse(
                 state.getDeliveryId(),
                 state.getDriverId(),
@@ -154,7 +162,7 @@ public class LocationIngestionService {
                 request.longitude(),
                 request.speedKph(),
                 request.heading(),
-                request.recordedAt(),
+                recordedAt,
                 receivedAt);
     }
 }

@@ -60,13 +60,19 @@ public interface DeliveryRepository extends JpaRepository<Delivery, Long> {
     List<DriverDeliveryCount> countByDriverIdsAndStatus(@Param("ids") Collection<Long> ids,
             @Param("status") DeliveryStatus status);
 
+    /**
+     * Every bound is compared directly rather than behind an {@code is null} guard, so
+     * the statement stays valid when a filter is absent. Callers substitute a real
+     * timestamp for an omitted date range — see {@code DeliveryService.search}, which
+     * explains why Postgres rejects the nullable-parameter form outright.
+     */
     @Query("""
             select d from Delivery d
             where (:status is null or d.status = :status)
               and (:driverId is null or d.driverId = :driverId)
               and (:vehicleId is null or d.vehicleId = :vehicleId)
-              and (:createdFrom is null or d.createdAt >= :createdFrom)
-              and (:createdTo is null or d.createdAt < :createdTo)
+              and d.createdAt >= :createdFrom
+              and d.createdAt < :createdTo
             """)
     Page<Delivery> search(@Param("status") DeliveryStatus status,
             @Param("driverId") Long driverId,

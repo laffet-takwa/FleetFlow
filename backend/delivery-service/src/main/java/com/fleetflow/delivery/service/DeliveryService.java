@@ -56,6 +56,9 @@ public class DeliveryService {
 
     private static final Logger log = LoggerFactory.getLogger(DeliveryService.class);
 
+    /** Upper bound for an open-ended date filter; deliveries cannot be created in the future. */
+    private static final Instant FAR_FUTURE = Instant.parse("2999-12-31T23:59:59Z");
+
     private final DeliveryRepository deliveryRepository;
     private final DriverRepository driverRepository;
     private final VehicleRepository vehicleRepository;
@@ -90,7 +93,17 @@ public class DeliveryService {
 
         DeliveryStatus parsed = status == null || status.isBlank() ? null : DeliveryStatus.from(status);
         Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
-        Page<Delivery> result = deliveryRepository.search(parsed, driverId, vehicleId, from, to, pageable);
+
+        // An absent date bound becomes a real timestamp rather than null. A query of the
+        // form "(:from is null or createdAt >= :from)" gives Postgres a parameter whose
+        // type it cannot infer, and it rejects the whole statement with "could not
+        // determine data type of parameter" — so the list endpoint would fail whenever
+        // the caller omitted the date filter, which is the common case.
+        Instant lowerBound = from == null ? Instant.EPOCH : from;
+        Instant upperBound = to == null ? FAR_FUTURE : to;
+
+        Page<Delivery> result = deliveryRepository.search(parsed, driverId, vehicleId, lowerBound, upperBound,
+                pageable);
         return PageResponse.from(result, result.getContent().stream().map(mapper::toResponse).toList());
     }
 

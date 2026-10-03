@@ -103,8 +103,16 @@ developer machine that is not demonstrating observability.
 **Verify the flow works**, rather than assuming it does:
 
 ```bash
-./scripts/verify-e2e.sh
+./scripts/verify-e2e.sh        # 27 checks over the whole business flow
+./scripts/verify-frontend.sh   # SPA served, /api proxied, auth enforced
 ```
+
+Both are re-runnable: the first cancels any in-flight deliveries before it starts, so it
+works against the fixed demo seed rather than needing a reset.
+
+**If a host port is already in use.** Every published port comes from `.env`, so moving
+the stack is a one-file change (`GATEWAY_PORT=18080 FRONTEND_PORT=18088 …`). Container
+to container URLs use the compose network and are unaffected.
 
 ---
 

@@ -43,8 +43,29 @@ Open **http://localhost:8088** and sign in as `customer1@fleetflow.local` /
 
 The verification script walks the whole flow — registration, checkout, stock
 reservation, delivery creation, assignment, driver progress, live tracking, completion
-and notification — and prints a pass/fail line for each of the twenty steps. It is the
-acceptance test for this README's claims, and it runs against the real stack.
+and notification — and prints a pass/fail line for each of its twenty-seven steps. It is
+the acceptance test for this README's claims, and it runs against the real stack.
+
+### What "verified" means here
+
+Every claim below was checked against a running stack, not against a compile:
+
+| Check | Result |
+|---|---|
+| `mvn -B install` (whole reactor, tests included) | BUILD SUCCESS — **264 tests, 0 failures** |
+| `npm run lint` / `npm run typecheck` / `npm run build` | all exit 0 |
+| `docker compose up --build` | 14 containers, all healthy |
+| `./scripts/verify-e2e.sh` | **27/27**, exit 0, and re-runnable |
+| `./scripts/verify-frontend.sh` | **9/9** — SPA served, `/api` proxied, auth enforced |
+
+The last two scripts are part of the repository, not one-off commands.
+
+### If a port is already taken
+
+Compose reads every host port from `.env`, so moving the stack off a busy machine is a
+matter of editing that one file (for example `GATEWAY_PORT=18080`). The defaults in
+`.env.example` are the documented ones; container-to-container URLs are unaffected
+because they use the compose network, not host ports.
 
 ### Watch it happen by hand
 
@@ -243,8 +264,10 @@ fleetflow/
 │   ├── docker/              multi-stage Dockerfiles, nginx, Postgres bootstrap
 │   ├── kubernetes/          namespace, config, secrets, per-service manifests, ingress
 │   └── elk/                 Logstash pipeline, Filebeat
+├── scripts/
+│   ├── verify-e2e.sh        the 27-step acceptance test
+│   └── verify-frontend.sh   the browser path: SPA + gateway proxy + auth
 ├── docs/                    architecture, api, kafka-events, database, deployment, ui
-├── scripts/verify-e2e.sh    the twenty-step acceptance test
 ├── docker-compose.yml
 └── .github/workflows/       ci.yml, frontend.yml
 ```
@@ -279,7 +302,15 @@ cd frontend && npm run lint && npm run typecheck && npm run build
 
 # The whole business flow against a running stack
 ./scripts/verify-e2e.sh
+
+# The browser path: SPA served by nginx, /api proxied to the gateway
+./scripts/verify-frontend.sh
 ```
+
+`scripts/verify-e2e.sh` needs only `bash`, `curl` and `node` — node because the SPA
+already requires it, so the test adds no dependency the project does not already have.
+It cancels any in-flight deliveries before it starts, which is what makes it re-runnable
+against a fixed set of demo data.
 
 Unit tests cover the business rules, not the plumbing: a customer may only cancel before
 delivery processing begins; a reservation that exceeds availability changes nothing and
@@ -292,6 +323,22 @@ Integration tests use Testcontainers against real databases. One of them in
 `EntityManagerFactory` with `ddl-auto=validate` against the exact column types the
 migrations write. A drift in the shared `TimestampedEntity` mapping would otherwise fail
 seven services simultaneously at boot, in production, with an obscure message.
+
+### What running the stack in anger actually found
+
+Worth recording, because every one of these passed compilation and every unit test:
+
+| Bug | Why no test caught it |
+|---|---|
+| `IdempotencyService` used `queryForObject("SELECT 1 …")` | `JdbcTemplate` throws on *zero* rows, so the **first** event any consumer saw blew up — which silently blocked the entire order→inventory→delivery→notification flow. |
+| The reactive gateway could not load the shared auto-configuration | Spring introspects every `@Bean` signature while evaluating conditions, so a class holding servlet types died with `NoClassDefFoundError: jakarta/servlet/Filter`. Split into two auto-configurations. |
+| The gateway's correlation-ID filter wrote read-only headers | CORS decorates the exchange *before* global filters run. Moved to a `WebFilter` ordered ahead of CORS. |
+| A `RemoveRequestHeader` gateway default broke every routed request | Same read-only-headers cause, one layer down. |
+| The gateway's 30s response timeout killed SSE with a 504 | Only visible mid-delivery, over an open stream. |
+| `(:search is null or lower(col) like …)` bound a null `String` as `bytea` | Every *unfiltered* search 500'd, and the unit tests only exercised a populated filter. |
+| `recordedAt` was never defaulted | The SSE broadcast NPE'd *after* the point was persisted — a 500 telling the driver their report was lost when it was not. |
+| `POST /internal/api/customers` never existed, though auth-service called it from day one | Two services agreed on a contract in their own heads. Delivery creation then failed forever on a 404. |
+| `kafka-topics.sh` is not on `PATH` in `apache/kafka:3.8.1` | The init loop spun forever on "command not found", which reads exactly like an unreachable broker. |
 
 ---
 

@@ -7,6 +7,12 @@
 // reached through the real UI - the script signs in through the login form rather
 // than injecting a token - so a broken route or a guard that rejects the wrong role
 // fails here instead of producing a misleading picture of a blank page.
+//
+// Output format is PNG by default; JPEG is for when the shots are going somewhere
+// that cannot carry a lossless PNG:
+//
+//   SHOT_FORMAT=jpeg SHOT_QUALITY=88 SHOTS_DIR=../docs/screenshots-jpg \
+//     node capture-screenshots.mjs
 
 import { chromium } from 'playwright'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -15,6 +21,16 @@ import { join } from 'node:path'
 const BASE_URL = process.env.SPA_URL ?? 'http://localhost:18088'
 const API_URL = process.env.API_URL ?? 'http://localhost:18080'
 const OUT = process.env.SHOTS_DIR ?? 'screenshots'
+
+// `jpeg` is the name Chromium knows the format by; `jpg` is the name the file
+// gets. Accept either spelling for the setting so the command line reads naturally.
+const FORMAT = (() => {
+  const requested = (process.env.SHOT_FORMAT ?? 'png').toLowerCase()
+  if (requested === 'jpg' || requested === 'jpeg') return { type: 'jpeg', ext: 'jpg' }
+  if (requested === 'png') return { type: 'png', ext: 'png' }
+  throw new Error(`SHOT_FORMAT must be png or jpeg, got "${requested}"`)
+})()
+const QUALITY = Number(process.env.SHOT_QUALITY ?? 90)
 
 const DESKTOP = { width: 1440, height: 900 }
 const TABLET = { width: 1024, height: 800 }
@@ -100,7 +116,7 @@ async function signInThroughUi(page, email) {
 }
 
 async function shoot(page, folder, name, { path, fullPage = true, theme, viewport, waitFor } = {}) {
-  const target = join(OUT, folder, `${slug(name)}.png`)
+  const target = join(OUT, folder, `${slug(name)}.${FORMAT.ext}`)
   mkdirSync(join(OUT, folder), { recursive: true })
 
   if (viewport) {
@@ -129,9 +145,14 @@ async function shoot(page, folder, name, { path, fullPage = true, theme, viewpor
     throw new Error(`expected to stay on ${path}, landed on ${where}`)
   }
 
-  await page.screenshot({ path: target, fullPage })
+  await page.screenshot({
+    path: target,
+    fullPage,
+    type: FORMAT.type,
+    ...(FORMAT.type === 'jpeg' ? { quality: QUALITY } : {}),
+  })
   captured.push({ folder, name, file: target.replace(/\\/g, '/'), url: where })
-  console.log(`  captured ${folder}/${slug(name)}.png`)
+  console.log(`  captured ${folder}/${slug(name)}.${FORMAT.ext}`)
 }
 
 async function main() {
@@ -404,7 +425,9 @@ async function main() {
     '```bash',
     'docker compose up --build',
     'cd scripts && npm install && npx playwright install chromium',
-    'node capture-screenshots.mjs',
+    FORMAT.type === 'jpeg'
+      ? `SHOT_FORMAT=jpeg SHOT_QUALITY=${QUALITY} node capture-screenshots.mjs`
+      : 'node capture-screenshots.mjs',
     '```',
     '',
   ]

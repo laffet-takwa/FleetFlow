@@ -236,7 +236,7 @@ export function homeRouteFor(roles: Role[]): string {
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
 
-  if (auth.initialising) {
+  if (!auth.sessionChecked) {
     await auth.restore()
   }
 

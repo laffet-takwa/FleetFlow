@@ -36,18 +36,60 @@ const composeFiles = ['docker-compose.yml', '.env.example'].filter((f) => {
 
 const seen = new Map()
 
-for (const file of walk('backend', (f) => f.endsWith('Controller.java'))) {
-  const source = readFileSync(file, 'utf8')
-  const base = /@RequestMapping\(\s*(?:value\s*=\s*)?"([^"]*)"/.exec(source)?.[1] ?? ''
-  // Accept both @GetMapping("/x") and @GetMapping(value = "/x", produces = ...).
-  for (const match of source.matchAll(
-    /@(Get|Post|Put|Patch|Delete)Mapping\(\s*(?:value\s*=\s*)?"([^"]*)"/g,
-  )) {
-    const path = (base + match[2]).replace(/\{[^}]+\}/g, '{p}')
-    const key = `${match[1].toUpperCase()} ${path}`
-    if (!seen.has(key)) seen.set(key, [])
-    seen.get(key).push(relative('.', file).split('\\').join('/'))
+// @GetMapping("/x"), @GetMapping(value = "/x", produces = ...), @GetMapping({"/x","/y"})
+// and the bare @GetMapping, which maps the class-level path itself.
+const MAPPING_WITH_ARGS =
+  /@(Get|Post|Put|Patch|Delete)Mapping\(\s*(?:value\s*=\s*)?(?:"([^"]*)"|\{([^}]*)\})[^)]*\)/g
+const MAPPING_BARE = /@(Get|Post|Put|Patch|Delete)Mapping(?!\s*\()/g
+const CLASS_MARKER = /@RestController\b/g
+
+/** Every mapping declared in one controller segment, as { verb, path }. */
+function mappingsOf(segment) {
+  const found = []
+  for (const match of segment.matchAll(MAPPING_WITH_ARGS)) {
+    const literals = [
+      ...(match[2] ? [match[2]] : []),
+      ...(match[3] ? [...match[3].matchAll(/"([^"]*)"/g)].map((m) => m[1]) : []),
+    ]
+    for (const literal of literals) found.push({ verb: match[1], path: literal })
   }
+  // A bare annotation carries no parentheses, so it cannot collide with the form above.
+  for (const match of segment.matchAll(MAPPING_BARE)) {
+    found.push({ verb: match[1], path: '' })
+  }
+  return found
+}
+
+for (const file of walk('backend', (f) => f.endsWith('.java'))) {
+  const source = readFileSync(file, 'utf8')
+  if (!source.includes('@RestController')) continue
+  const where = relative('.', file).split('\\').join('/')
+
+  // One file can hold more than one controller, and each has its own base path. Taking
+  // the first @RequestMapping in the file would mis-attribute every mapping after the
+  // first class, which hides exactly the ambiguity this check exists to find.
+  const markers = [...source.matchAll(CLASS_MARKER)].map((match) => match.index)
+
+  markers.forEach((start, position) => {
+    const end = position + 1 < markers.length ? markers[position + 1] : source.length
+    const segment = source.slice(start, end)
+
+    // The class-level base path is declared immediately after @RestController, inside
+    // this segment - searching before the marker would miss it and collapse every
+    // mapping to "/{p}", which reads as a false ambiguity between unrelated controllers.
+    const bases = [...segment.matchAll(/@RequestMapping\(\s*(?:value\s*=\s*)?"([^"]*)"/g)]
+    const base = bases.length > 0 ? bases[0][1] : ''
+
+for (const { verb, path: literal } of mappingsOf(segment)) {
+      const path = (base + literal).replace(/\{[^}]+\}/g, '{p}')
+      // Scoped to the module: two services may both expose GET /me, because each runs
+      // in its own application context. Only a clash inside one module is ambiguous.
+      const module = file.split(/[\\/]/).slice(0, 2).join('/')
+      const key = `${module} ${verb.toUpperCase()} ${path}`
+      if (!seen.has(key)) seen.set(key, [])
+      seen.get(key).push(where)
+    }
+  })
 }
 
 for (const [key, files] of seen) {
@@ -58,11 +100,16 @@ for (const [key, files] of seen) {
 
 // -------------------------------------------------- credentials in source
 
-// A literal that looks like a credential. Both quoted and bare forms are matched:
-// `password: "x"` and `DB_PASSWORD=x` are both realistic ways to commit one, and a
-// check that only catches the quoted form is a check that quietly misses half the cases.
-const SECRET_LITERAL =
-  /(?:password|secret|token|api[-_]?key)[A-Za-z0-9_.-]*\s*[:=]\s*(?:"([^"\s]{8,})"|'([^'\s]{8,})'|([^\s"']{8,}))/gi
+// A literal that looks like a credential.
+//
+// In Java a secret is always a string literal, so only the quoted forms are matched -
+// allowing a bare form there would flag every `passwordEncoder.encode(...)` call.
+// In YAML and .env files the bare `KEY=value` form is the real syntax, so it is matched
+// too: catching half the ways a secret can be committed is worse than not checking.
+const SECRET_QUOTED =
+  /(?:password|secret|token|api[-_]?key)[A-Za-z0-9_.-]*\s*[:=]\s*(?:"([^"\s]{8,})"|'([^'\s]{8,})')/gi
+const SECRET_BARE =
+  /(?:password|secret|token|api[-_]?key)[A-Za-z0-9_.-]*\s*[:=]\s*([^\s"',#][^\s"']{7,})/gi
 // Development defaults that exist on purpose and are documented as such.
 const ALLOWED = new Set([
   'fleetflow-local-development-secret-key-change-me-0123456789',
@@ -80,16 +127,23 @@ for (const file of [...javaFiles, ...yamlFiles, ...composeFiles]) {
   if (/(^|\/)src\/test\//.test(where)) continue
 
   const source = readFileSync(file, 'utf8')
-  for (const match of source.matchAll(SECRET_LITERAL)) {
-    const value = match[1]
-    if (ALLOWED.has(value)) continue
-    if (/^\$\{/.test(value)) continue // a property placeholder, not a literal
-    if (value.startsWith('REPLACE_ME')) continue // documented placeholder
-    note(
-      'possible credential',
-      where,
-      `"${value.slice(0, 12)}…" looks like a committed secret`,
-    )
+  const isConfig = /\.(yml|yaml|env)$/.test(file) || file === '.env' || file === '.env.example'
+  const patterns = isConfig ? [SECRET_QUOTED, SECRET_BARE] : [SECRET_QUOTED]
+
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      // Each pattern has one group per quoting style; exactly one is populated.
+      const value = match[1] ?? match[2] ?? match[3]
+      if (!value) continue
+      if (ALLOWED.has(value)) continue
+      if (/^\$\{/.test(value)) continue // a property placeholder, not a literal
+      if (value.startsWith('REPLACE_ME')) continue // documented placeholder
+      note(
+        'possible credential',
+        where,
+        `"${value.slice(0, 12)}…" looks like a committed secret`,
+      )
+    }
   }
 }
 

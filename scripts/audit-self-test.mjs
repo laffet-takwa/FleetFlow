@@ -10,7 +10,12 @@ import { join } from 'node:path'
 
 let failures = 0
 
-function expectFailure(label, script, mutate) {
+/**
+ * Feeds a known defect to an audit and requires that the audit (a) exits non-zero and
+ * (b) actually names the defect. Without the keyword check a script that simply crashes
+ * on a syntax error would look like a passing detector, which is worse than no check.
+ */
+function expectDetection(label, script, mutate, expectedKeyword) {
   const workspace = mkdtempSync(join(tmpdir(), 'fleetflow-audit-'))
   try {
     // Both scripts walk from the repository root, so give them a copy to work on.
@@ -36,8 +41,11 @@ function expectFailure(label, script, mutate) {
     if (code === 0) {
       console.log(`  FAIL  ${label}: the audit passed on a known defect`)
       failures += 1
+    } else if (!output.includes(expectedKeyword)) {
+      console.log(`  FAIL  ${label}: exited ${code} but never reported "${expectedKeyword}" (crashed?)`)
+      failures += 1
     } else {
-      console.log(`  PASS  ${label}: detected and exited ${code}`)
+      console.log(`  PASS  ${label}: reported "${expectedKeyword}" and exited ${code}`)
     }
   } finally {
     rmSync(workspace, { recursive: true, force: true })
@@ -46,86 +54,117 @@ function expectFailure(label, script, mutate) {
 
 console.log('Self-test for the repository audits\n')
 
-expectFailure('duplicate top-level YAML key', 'audit-repo.mjs', (workspace) => {
-  const target = join(
-    workspace,
-    'backend',
-    'order-service',
-    'src',
-    'main',
-    'resources',
-    'application.yml',
-  )
-  writeFileSync(target, `${readFileSync(target, 'utf8')}\nfleetflow:\n  injected: true\n`)
-})
+expectDetection(
+  'duplicate top-level YAML key',
+  'audit-repo.mjs',
+  (workspace) => {
+    const target = join(
+      workspace,
+      'backend',
+      'order-service',
+      'src',
+      'main',
+      'resources',
+      'application.yml',
+    )
+    writeFileSync(target, `${readFileSync(target, 'utf8')}\nfleetflow:\n  injected: true\n`)
+  },
+  'duplicate YAML key',
+)
 
-expectFailure('de-indented YAML key', 'audit-repo.mjs', (workspace) => {
-  const target = join(
-    workspace,
-    'backend',
-    'auth-service',
-    'src',
-    'main',
-    'resources',
-    'application.yml',
-  )
-  const source = readFileSync(target, 'utf8').replace(
-    '    com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}',
-    'com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}',
-  )
-  writeFileSync(target, source)
-})
+expectDetection(
+  'de-indented YAML key',
+  'audit-repo.mjs',
+  (workspace) => {
+    const target = join(
+      workspace,
+      'backend',
+      'auth-service',
+      'src',
+      'main',
+      'resources',
+      'application.yml',
+    )
+    const source = readFileSync(target, 'utf8').replace(
+      '    com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}',
+      'com.fleetflow: ${LOG_LEVEL_COM_FLEETFLOW:INFO}',
+    )
+    writeFileSync(target, source)
+  },
+  'de-indented YAML key',
+)
 
-expectFailure('ambiguous request mapping', 'audit-repo.mjs', (workspace) => {
-  const target = join(
-    workspace,
-    'backend',
-    'order-service',
-    'src',
-    'main',
-    'java',
-    'com',
-    'fleetflow',
-    'order',
-    'controller',
-    'OrderController.java',
-  )
-  const source = readFileSync(target, 'utf8')
-  writeFileSync(
-    target,
-    `${source}\nclass DuplicateMapping { @GetMapping("/orders") void duplicate() {} }\n`,
-  )
-})
+expectDetection(
+  'ambiguous request mapping',
+  'audit-repo.mjs',
+  (workspace) => {
+    const target = join(
+      workspace,
+      'backend',
+      'order-service',
+      'src',
+      'main',
+      'java',
+      'com',
+      'fleetflow',
+      'order',
+      'controller',
+      'OrderController.java',
+    )
+    // GET /api/orders already exists there. Declaring a second controller for the same
+    // path is the shape of mistake a merge produces, and Spring refuses to start on it.
+    writeFileSync(
+      target,
+      `${readFileSync(target, 'utf8')}\n` +
+        '@RestController\n' +
+        '@RequestMapping("/api")\n' +
+        'class DuplicateMappingFixture {\n' +
+        '    @GetMapping(value = "/orders")\n' +
+        '    void duplicate() { }\n' +
+        '}\n',
+    )
+  },
+  'ambiguous mapping',
+)
 
-expectFailure('committed credential', 'audit-repo.mjs', (workspace) => {
-  const target = join(workspace, 'docker-compose.yml')
-  writeFileSync(
-    target,
-    `${readFileSync(target, 'utf8')}\n# DB_PASSWORD=a-real-looking-production-value\n`,
-  )
-})
+expectDetection(
+  'committed credential',
+  'audit-repo.mjs',
+  (workspace) => {
+    const target = join(workspace, 'docker-compose.yml')
+    writeFileSync(
+      target,
+      `${readFileSync(target, 'utf8')}\n# DB_PASSWORD=a-real-looking-production-value\n`,
+    )
+  },
+  'possible credential',
+)
 
-expectFailure('SPA call with no endpoint', 'audit-api.mjs', (workspace) => {
-  const target = join(workspace, 'frontend', 'src', 'services', 'productApi.ts')
-  writeFileSync(
-    target,
-    `${readFileSync(target, 'utf8')}\nexport const injected = () => get('/products/does-not-exist')\n`,
-  )
-})
+expectDetection(
+  'SPA call with no endpoint',
+  'audit-api.mjs',
+  (workspace) => {
+    const target = join(workspace, 'frontend', 'src', 'services', 'productApi.ts')
+    writeFileSync(
+      target,
+      `${readFileSync(target, 'utf8')}\nexport const injected = () => get('/products/does-not-exist')\n`,
+    )
+  },
+  'no matching endpoint',
+)
 
-expectFailure('SPA call outside the gateway route table', 'audit-api.mjs', (workspace) => {
-  const target = join(
-    workspace,
-    'frontend',
-    'src',
-    'services',
-    'productApi.ts',
-  )
-  writeFileSync(
-    target,
-    `${readFileSync(target, 'utf8')}\nexport const injected = () => get('/inventories/9')\n`,
-  )
-})
+expectDetection(
+  'SPA call outside the gateway route table',
+  'audit-api.mjs',
+  (workspace) => {
+    const target = join(workspace, 'frontend', 'src', 'services', 'productApi.ts')
+    writeFileSync(
+      target,
+      `${readFileSync(target, 'utf8')}\nexport const injected = () => get('/inventories/9')\n`,
+    )
+  },
+  'not covered by a gateway route prefix',
+)
 
 console.log('')
 if (failures === 0) {

@@ -5,6 +5,23 @@
 A production-shaped microservices platform built to demonstrate one complete business
 flow end to end, rather than a collection of CRUD screens.
 
+**Demo:** <http://localhost:8088> — sign in as `customer1@fleetflow.local` / `Password123!`
+(see [Demo credentials](#demo-credentials) for the operations and driver accounts).
+The port is `FRONTEND_PORT` from `.env`, so a machine that already owns 8088 moves the
+whole stack with one edit.
+
+**Portfolio:** <https://laffet-takwa.github.io/portfolio/> — the project write-up, the
+architecture notes and the other eight projects live there.
+
+| Operations | Inventory | Live tracking |
+| --- | --- | --- |
+| ![Operations dashboard](docs/screenshots/operations-dashboard.webp) | ![Inventory](docs/screenshots/operations-inventory.webp) | ![Live operations map](docs/screenshots/operations-tracking-map.webp) |
+| **Customer checkout** | **Customer tracking** | **Driver delivery** |
+| ![Customer checkout](docs/screenshots/customer-checkout.webp) | ![Customer tracking](docs/screenshots/customer-tracking.webp) | ![Driver delivery](docs/screenshots/driver-delivery.webp) |
+
+Every image in this file was captured from the running stack against real seeded data —
+no mockups, no staging environment.
+
 ```mermaid
 graph LR
     Browser["Vue 3 SPA<br/>Customer · Driver · Operations"]
@@ -395,17 +412,31 @@ with three audiences is a different problem from one audience with one applicati
 
 ## Screenshots
 
-The running application is the demonstration. The screens that matter:
+The running application is the demonstration. The screens that matter, captured from
+`docs/screenshots/` against the seeded stack:
 
-| Screen | Route | What to look at |
-|---|---|---|
-| Operations dashboard | `/admin` | KPI cards from live endpoints, active deliveries, real-data chart |
-| Order detail | `/admin/orders/:id` | Timeline built from the status history, staff actions gated |
-| Inventory | `/admin/inventory` | Low stock visible immediately, filters, adjustment dialog |
-| Live operations map | `/admin/tracking` | Full-width Leaflet map, delivery list, live positions |
-| Customer checkout | `/customer/checkout` | Four explicit steps, cash on delivery |
-| Customer tracking | `/customer/tracking/:id` | Live map over SSE, connection status, timeline |
-| Driver delivery | `/driver/deliveries/:id` | Large status, one primary action, demo simulation |
+| Screen | Route | What to look at | Image |
+|---|---|---|---|
+| Sign in | `/login` | The one screen every audience starts at | [login](docs/screenshots/login.webp) |
+| Operations dashboard | `/admin` | KPI cards from live endpoints, active deliveries, real-data chart | [dashboard](docs/screenshots/operations-dashboard.webp) |
+| Orders | `/admin/orders` | Dispatch list with status filters | [orders](docs/screenshots/operations-orders.webp) |
+| Order detail | `/admin/orders/:id` | Timeline built from the status history, staff actions gated | [detail](docs/screenshots/operations-order-detail.webp) |
+| Inventory | `/admin/inventory` | Low stock visible immediately, filters, adjustment dialog | [inventory](docs/screenshots/operations-inventory.webp) |
+| Deliveries | `/admin/deliveries` | Dispatch board for every delivery the service knows about | [deliveries](docs/screenshots/operations-deliveries.webp) |
+| Live operations map | `/admin/tracking` | Full-width Leaflet map, delivery list, live positions | [map](docs/screenshots/operations-tracking-map.webp) |
+| Customer home | `/customer` | Cards-and-checkout, current orders at a glance | [home](docs/screenshots/customer-home.webp) |
+| Customer checkout | `/customer/checkout` | Four explicit steps, cash on delivery | [checkout](docs/screenshots/customer-checkout.webp) |
+| Customer orders | `/customer/orders` | Order history with the tracking entry point | [orders](docs/screenshots/customer-orders.webp) |
+| Customer tracking | `/customer/tracking/:id` | Live map over SSE, connection status, timeline | [tracking](docs/screenshots/customer-tracking.webp) |
+| Driver today | `/driver` | Bottom navigation, today's stops, large touch targets | [today](docs/screenshots/driver-today.webp) |
+| Driver deliveries | `/driver/deliveries` | Assigned stops and their state | [deliveries](docs/screenshots/driver-deliveries.webp) |
+| Driver delivery | `/driver/deliveries/:id` | Large status, one primary action, demo simulation | [delivery](docs/screenshots/driver-delivery.webp) |
+
+They were captured from the running stack with headless Chrome — the demo accounts
+above, the seeded data, 1440×900 for the desktop shells and 430×932 for the driver app,
+then downscaled to 1100×688 WebP so this file stays light. Recapture them the same way
+after changing a screen; `scripts/capture-screenshots.mjs` walks the same routes through
+the real UI and is the place to extend the list.
 
 ---
 

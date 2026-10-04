@@ -13,10 +13,14 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
@@ -72,9 +76,51 @@ public class GlobalExceptionHandler {
         return build(ErrorCode.BAD_REQUEST, "Request body is missing or not valid JSON", request, List.of());
     }
 
-    @ExceptionHandler({ MethodArgumentTypeMismatchException.class, MissingServletRequestParameterException.class })
-    public ResponseEntity<ApiErrorResponse> handleBadParameter(Exception ex, HttpServletRequest request) {
-        return build(ErrorCode.BAD_REQUEST, ex.getMessage(), request, List.of());
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex,
+            HttpServletRequest request) {
+        // The framework message names the target Java type and the nested converter
+        // exception ("...to required type 'java.time.Instant'; nested exception is
+        // java.time.format.DateTimeParseException..."). Naming the parameter is enough
+        // for the caller, so the internal types stay in the log.
+        log.debug("Rejected a request with an unusable value for parameter {} on {} {}",
+                ex.getName(), request.getMethod(), request.getRequestURI());
+        return build(ErrorCode.BAD_REQUEST,
+                "Parameter '" + ex.getName() + "' has an invalid value", request, List.of());
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<ApiErrorResponse> handleMissingParameter(MissingServletRequestParameterException ex,
+            HttpServletRequest request) {
+        return build(ErrorCode.BAD_REQUEST,
+                "Required parameter '" + ex.getParameterName() + "' is missing", request, List.of());
+    }
+
+    @ExceptionHandler({ HttpRequestMethodNotSupportedException.class, HttpMediaTypeNotSupportedException.class,
+            MissingRequestHeaderException.class })
+    public ResponseEntity<ApiErrorResponse> handleRejectedRequestMapping(Exception ex, HttpServletRequest request) {
+        // These describe a well formed request that simply cannot be served here. Left
+        // unhandled they fall through to the catch-all and are reported as a 500, which
+        // blames the platform for the caller's mistake and pollutes the error budget.
+        ErrorCode code = ex instanceof HttpRequestMethodNotSupportedException
+                ? ErrorCode.METHOD_NOT_ALLOWED
+                : (ex instanceof HttpMediaTypeNotSupportedException
+                        ? ErrorCode.UNSUPPORTED_MEDIA_TYPE
+                        : ErrorCode.BAD_REQUEST);
+        return build(code, code.defaultMessage(), request, List.of());
+    }
+
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public ResponseEntity<ApiErrorResponse> handleMethodValidation(HandlerMethodValidationException ex,
+            HttpServletRequest request) {
+        // Raised instead of ConstraintViolationException when a controller declares
+        // constraints on its parameters without @Validated on the class.
+        List<ApiErrorResponse.FieldViolation> violations = ex.getAllValidationResults().stream()
+                .flatMap(result -> result.getResolvableErrors().stream()
+                        .map(error -> new ApiErrorResponse.FieldViolation(
+                                result.getMethodParameter().getParameterName(), error.getDefaultMessage())))
+                .toList();
+        return build(ErrorCode.VALIDATION_FAILED, "Request validation failed", request, violations);
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)

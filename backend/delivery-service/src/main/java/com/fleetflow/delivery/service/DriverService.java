@@ -7,7 +7,6 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -50,7 +49,7 @@ public class DriverService {
 
     public PageResponse<DriverResponse> search(String status, String search, int page, int size) {
         DriverStatus parsed = status == null || status.isBlank() ? null : DriverStatus.from(status);
-        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.ASC, "fullName"));
+        Pageable pageable = PageBounds.of(page, size, Sort.by(Sort.Direction.ASC, "fullName"));
         Page<Driver> result = driverRepository.search(parsed, blankToNull(search), pageable);
         return PageResponse.from(result, enrich(result.getContent()));
     }
@@ -69,10 +68,15 @@ public class DriverService {
     /**
      * A driver declares when they start or end their shift. {@code ON_DELIVERY} is
      * owned by operations, so a driver can never grant themselves a job.
+     *
+     * <p>The row is read under a write lock: "no delivery of mine is still open" is
+     * checked here and relied on by {@code assign}, so the two must not interleave and
+     * leave a driver AVAILABLE and on a delivery at the same time.
      */
     @Transactional
     public DriverResponse setOwnStatus(Long userId, String status) {
-        Driver driver = requireDriver(userId);
+        Driver driver = driverRepository.findLockedByUserId(userId)
+                .orElseThrow(() -> ResourceNotFoundException.of("Driver", userId));
         DriverStatus target = DriverStatus.from(status);
         if (target == DriverStatus.ON_DELIVERY) {
             throw new BusinessException(ErrorCode.CONFLICT,

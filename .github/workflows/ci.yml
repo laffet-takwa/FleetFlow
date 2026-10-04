@@ -50,6 +50,13 @@ jobs:
       - name: Verify the reactor resolves and every module compiles
         run: mvn -B -f backend/pom.xml -DskipTests verify
 
+      # Cross-cutting checks that belong to the repository rather than to one module:
+      # ambiguous request mappings, credentials committed to source, and configuration
+      # that contradicts itself. A duplicate top level YAML key is a boot failure, not a
+      # style nit, and four service configs were merged by hand during development.
+      - name: Audit configuration and committed credentials
+        run: node scripts/audit-repo.mjs
+
       # Integration tests are tagged, so they can be skipped here and run on a
       # runner that can actually start containers.
       - name: Unit tests

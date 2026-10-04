@@ -139,7 +139,7 @@ public class OrderLifecycleService {
     // -------------------------------------------------------------------- helpers
 
     private void withOrder(Long orderId, Consumer<Order> action) {
-        Optional<Order> found = orderId == null ? Optional.empty() : orderService.findOptionalOrder(orderId);
+        Optional<Order> found = orderId == null ? Optional.empty() : orderService.findOptionalOrderForUpdate(orderId);
         if (found.isEmpty()) {
             log.warn("Ignoring an event for unknown order {} [correlationId={}]", orderId,
                     CorrelationId.getOrCreate());

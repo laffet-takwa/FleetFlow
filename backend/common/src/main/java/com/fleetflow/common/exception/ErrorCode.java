@@ -18,6 +18,8 @@ public enum ErrorCode {
     TOKEN_INVALID(HttpStatus.UNAUTHORIZED, "Access token is not valid"),
     FORBIDDEN(HttpStatus.FORBIDDEN, "You are not allowed to perform this action"),
     NOT_FOUND(HttpStatus.NOT_FOUND, "Resource not found"),
+    METHOD_NOT_ALLOWED(HttpStatus.METHOD_NOT_ALLOWED, "Method not allowed for this endpoint"),
+    UNSUPPORTED_MEDIA_TYPE(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported media type"),
     INSUFFICIENT_INVENTORY(HttpStatus.UNPROCESSABLE_ENTITY, "Not enough stock to fulfil this order"),
     UNPROCESSABLE(HttpStatus.UNPROCESSABLE_ENTITY, "Request could not be processed"),
     RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS, "Too many requests"),

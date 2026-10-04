@@ -73,7 +73,10 @@ class NotificationEventListenerTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private final AtomicReference<String> correlationIdDuringHandler = new AtomicReference<>();
+    private final AtomicReference<Boolean> transactionActiveAtInsert = new AtomicReference<>();
+    private final AtomicReference<Boolean> transactionActiveAtRecord = new AtomicReference<>();
 
+    private RecordingTransactionManager transactionManager;
     private NotificationEventListener listener;
 
     @BeforeEach
@@ -81,10 +84,13 @@ class NotificationEventListenerTest {
         NotificationService notificationService =
                 new NotificationService(repository, new NotificationMapper(), sseRegistry);
         NotificationProperties properties = new NotificationProperties();
-        listener = new NotificationEventListener(objectMapper, notificationService, idempotencyService, properties);
+        transactionManager = new RecordingTransactionManager();
+        listener = new NotificationEventListener(objectMapper, notificationService, idempotencyService,
+                properties, transactionManager);
 
         AtomicLong sequence = new AtomicLong(400L);
         when(repository.saveAndFlush(any(Notification.class))).thenAnswer(invocation -> {
+            transactionActiveAtInsert.set(TransactionSynchronizationManager.isActualTransactionActive());
             Notification saved = invocation.getArgument(0);
             saved.setId(sequence.incrementAndGet());
             saved.setCreatedAt(Instant.parse("2026-10-02T13:41:07.512Z"));
@@ -94,6 +100,7 @@ class NotificationEventListenerTest {
         // Mirrors the real implementation: an event id seen twice runs the action once.
         Set<String> processed = ConcurrentHashMap.newKeySet();
         when(idempotencyService.executeOnce(anyString(), anyString(), any())).thenAnswer(invocation -> {
+            transactionActiveAtRecord.set(TransactionSynchronizationManager.isActualTransactionActive());
             correlationIdDuringHandler.set(CorrelationId.get());
             if (!processed.add(invocation.getArgument(0))) {
                 return false;
@@ -258,6 +265,85 @@ class NotificationEventListenerTest {
 
         verify(repository).saveAndFlush(any(Notification.class));
         verify(sseRegistry).push(org.mockito.ArgumentMatchers.eq(CUSTOMER_ID), any());
+    }
+
+    @Test
+    void theNotificationAndTheIdempotencyRecordAreWrittenInOneTransaction() throws Exception {
+        // IdempotencyService records the event id only after the handler has returned.
+        // Two commits would leave a crash in between looking like an unseen event, and
+        // the redelivery would store the customer's notification a second time.
+        listener.onOrderCreated(json(EventTypes.ORDER_CREATED, "order.created", new OrderCreatedPayload(
+                ORDER_ID, CUSTOMER_ID, "Tunis", "1000", 3, new BigDecimal("412.500"))));
+
+        assertThat(transactionActiveAtInsert.get()).isTrue();
+        assertThat(transactionActiveAtRecord.get()).isTrue();
+        assertThat(transactionManager.commits()).isEqualTo(1);
+        assertThat(transactionManager.rollbacks()).isZero();
+    }
+
+    @Test
+    void aFailureInsideTheEventRollsBackTheIdempotencyRecordWithIt() throws Exception {
+        when(repository.saveAndFlush(any(Notification.class)))
+                .thenThrow(new IllegalStateException("notifications: value too long for type character varying(500)"));
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> listener.onOrderCreated(json(EventTypes.ORDER_CREATED, "order.created",
+                        new OrderCreatedPayload(ORDER_ID, CUSTOMER_ID, "Tunis", "1000", 3, new BigDecimal("412.500")))));
+
+        assertThat(transactionManager.rollbacks()).isEqualTo(1);
+        assertThat(transactionManager.commits()).isZero();
+    }
+
+    @Test
+    void everyOneOfTheEightConsumersRegistersItsEventIdForIdempotency() throws Exception {
+        String orderCreated = json("evt-order-created", EventTypes.ORDER_CREATED, "order.created",
+                new OrderCreatedPayload(ORDER_ID, CUSTOMER_ID, "Tunis", "1000", 3, new BigDecimal("412.500")));
+        String inventoryReserved = json("evt-inventory-reserved", EventTypes.INVENTORY_RESERVED, "inventory.reserved",
+                new InventoryReservedPayload(ORDER_ID, CUSTOMER_ID, 3L, "Tunis Sud warehouse",
+                        new BigDecimal("412.500"), 3));
+        String inventoryInsufficient = json("evt-inventory-insufficient", EventTypes.INVENTORY_INSUFFICIENT,
+                "inventory.insufficient", new InventoryInsufficientPayload(ORDER_ID, CUSTOMER_ID, List.of(
+                        new Shortfall(5L, "Laptop Pro 14", 2, 1))));
+        String deliveryAssigned = json("evt-delivery-assigned", EventTypes.DELIVERY_ASSIGNED, "delivery.assigned",
+                new DeliveryAssignedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, "Karim Ben Ali", 2L,
+                        "123 Tunis 4521"));
+        String deliveryStarted = json("evt-delivery-started", EventTypes.DELIVERY_STARTED, "delivery.started",
+                deliveryStatusChanged("PICKED_UP", "IN_TRANSIT", null));
+        String deliveryCompleted = json("evt-delivery-completed", EventTypes.DELIVERY_COMPLETED, "delivery.completed",
+                new DeliveryCompletedPayload(DELIVERY_ID, ORDER_ID, CUSTOMER_ID, 3L, 33L, Instant.now(), "left at door"));
+        String deliveryFailed = json("evt-delivery-failed", EventTypes.DELIVERY_FAILED, "delivery.failed",
+                deliveryStatusChanged("IN_TRANSIT", "FAILED", "The recipient was not available."));
+        String deliveryCancelled = json("evt-delivery-cancelled", EventTypes.DELIVERY_CANCELLED, "delivery.cancelled",
+                deliveryStatusChanged("ASSIGNED", "CANCELLED", "The order was cancelled"));
+
+        listener.onOrderCreated(orderCreated);
+        listener.onInventoryReserved(inventoryReserved);
+        listener.onInventoryInsufficient(inventoryInsufficient);
+        listener.onDeliveryAssigned(deliveryAssigned);
+        listener.onDeliveryStarted(deliveryStarted);
+        listener.onDeliveryCompleted(deliveryCompleted);
+        listener.onDeliveryFailed(deliveryFailed);
+        listener.onDeliveryCancelled(deliveryCancelled);
+
+        ArgumentCaptor<String> eventIds = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> eventTypes = ArgumentCaptor.forClass(String.class);
+        verify(idempotencyService, org.mockito.Mockito.times(8)).executeOnce(eventIds.capture(), eventTypes.capture(), any());
+        assertThat(eventIds.getAllValues()).containsExactlyInAnyOrder(
+                "evt-order-created", "evt-inventory-reserved", "evt-inventory-insufficient", "evt-delivery-assigned",
+                "evt-delivery-started", "evt-delivery-completed", "evt-delivery-failed", "evt-delivery-cancelled");
+        assertThat(eventTypes.getAllValues()).containsExactlyInAnyOrder(
+                EventTypes.ORDER_CREATED, EventTypes.INVENTORY_RESERVED, EventTypes.INVENTORY_INSUFFICIENT,
+                EventTypes.DELIVERY_ASSIGNED, EventTypes.DELIVERY_STARTED, EventTypes.DELIVERY_COMPLETED,
+                EventTypes.DELIVERY_FAILED, EventTypes.DELIVERY_CANCELLED);
+    }
+
+    @Test
+    void deliveryFailedWithNoReasonFieldAtAllStillEndsAtTheFullStop() throws Exception {
+        listener.onDeliveryFailed(json(EventTypes.DELIVERY_FAILED, "delivery.failed",
+                deliveryStatusChanged("IN_TRANSIT", "FAILED", null)));
+
+        assertThat(singleStoredNotification().getMessage())
+                .isEqualTo("We could not complete the delivery of order #42.");
     }
 
     @Test

@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -23,12 +22,11 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 
-import com.fleetflow.common.event.DomainEventPublisher;
-import com.fleetflow.common.event.EventEnvelope;
 import com.fleetflow.common.event.EventTypes;
 import com.fleetflow.common.event.payload.DeliveryAssignedPayload;
 import com.fleetflow.common.event.payload.DeliveryCompletedPayload;
@@ -49,6 +47,7 @@ import com.fleetflow.delivery.entity.DriverStatus;
 import com.fleetflow.delivery.entity.Vehicle;
 import com.fleetflow.delivery.entity.VehicleStatus;
 import com.fleetflow.delivery.entity.VehicleType;
+import com.fleetflow.delivery.kafka.OutboundDeliveryEvent;
 import com.fleetflow.delivery.mapper.DeliveryMapper;
 import com.fleetflow.delivery.repository.DeliveryRepository;
 import com.fleetflow.delivery.repository.DriverRepository;
@@ -74,14 +73,12 @@ class DeliveryServiceTest {
     @Mock
     private VehicleRepository vehicleRepository;
     @Mock
-    private DomainEventPublisher eventPublisher;
+    private ApplicationEventPublisher applicationEvents;
     @Mock
     private CustomerServiceClient customerServiceClient;
 
     @Captor
-    private ArgumentCaptor<String> topicCaptor;
-    @Captor
-    private ArgumentCaptor<EventEnvelope<Object>> envelopeCaptor;
+    private ArgumentCaptor<OutboundDeliveryEvent> intentCaptor;
 
     private DeliveryService deliveryService;
 
@@ -96,7 +93,7 @@ class DeliveryServiceTest {
         topics.setDeliveryCancelled("delivery.cancelled");
 
         deliveryService = new DeliveryService(deliveryRepository, driverRepository, vehicleRepository,
-                eventPublisher, topics, customerServiceClient, new WarehouseProperties(), new DeliveryMapper());
+                applicationEvents, topics, customerServiceClient, new WarehouseProperties(), new DeliveryMapper());
     }
 
     @AfterEach
@@ -105,7 +102,7 @@ class DeliveryServiceTest {
     }
 
     @Test
-    @DisplayName("assigning a driver and a vehicle locks both and publishes delivery.assigned")
+    @DisplayName("assigning a driver and a vehicle locks both and announces delivery.assigned")
     void assignPublishesAndLocksResources() {
         Delivery delivery = delivery(DeliveryStatus.CREATED);
         Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE);
@@ -123,13 +120,13 @@ class DeliveryServiceTest {
         assertThat(driver.getStatus()).isEqualTo(DriverStatus.ON_DELIVERY);
         assertThat(vehicle.getStatus()).isEqualTo(VehicleStatus.IN_USE);
 
-        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
-        assertThat(topicCaptor.getValue()).isEqualTo("delivery.assigned");
-        assertThat(envelopeCaptor.getValue().eventType()).isEqualTo(EventTypes.DELIVERY_ASSIGNED);
-        assertThat(envelopeCaptor.getValue().topic()).isEqualTo("delivery.assigned");
+        OutboundDeliveryEvent intent = singleIntent();
+        assertThat(intent.topic()).isEqualTo("delivery.assigned");
+        assertThat(intent.key()).isEqualTo(String.valueOf(ORDER_ID));
+        assertThat(intent.envelope().eventType()).isEqualTo(EventTypes.DELIVERY_ASSIGNED);
+        assertThat(intent.envelope().topic()).isEqualTo("delivery.assigned");
 
-        DeliveryAssignedPayload payload =
-                (DeliveryAssignedPayload) envelopeCaptor.getValue().payload();
+        DeliveryAssignedPayload payload = (DeliveryAssignedPayload) intent.envelope().payload();
         assertThat(payload.deliveryId()).isEqualTo(DELIVERY_ID);
         assertThat(payload.orderId()).isEqualTo(ORDER_ID);
         assertThat(payload.driverId()).isEqualTo(DRIVER_ID);
@@ -139,11 +136,30 @@ class DeliveryServiceTest {
     }
 
     @Test
+    @DisplayName("assign reads all three rows under a write lock, never through the unlocked finder")
+    void assignReadsEverythingUnderAWriteLock() {
+        Delivery delivery = delivery(DeliveryStatus.CREATED);
+        givenDelivery(delivery, driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE),
+                vehicle(VEHICLE_ID, VehicleStatus.AVAILABLE));
+
+        deliveryService.assign(DRIVER_ID, VEHICLE_ID, DELIVERY_ID);
+
+        // The unlocked finders would let two concurrent requests both pass the
+        // availability check, so the locking variant is what has to be the one called.
+        verify(deliveryRepository).findLockedById(DELIVERY_ID);
+        verify(driverRepository).findLockedById(DRIVER_ID);
+        verify(vehicleRepository).findLockedById(VEHICLE_ID);
+        verify(deliveryRepository, never()).findById(any());
+        verify(driverRepository, never()).findById(any());
+        verify(vehicleRepository, never()).findById(any());
+    }
+
+    @Test
     @DisplayName("an OFFLINE driver cannot be assigned")
     void rejectsOfflineDriver() {
         Delivery delivery = delivery(DeliveryStatus.CREATED);
-        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
-        when(driverRepository.findById(DRIVER_ID))
+        when(deliveryRepository.findLockedById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+        when(driverRepository.findLockedById(DRIVER_ID))
                 .thenReturn(Optional.of(driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.OFFLINE)));
 
         assertThatThrownBy(() -> deliveryService.assign(DRIVER_ID, VEHICLE_ID, DELIVERY_ID))
@@ -151,19 +167,19 @@ class DeliveryServiceTest {
                 .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.CONFLICT))
                 .hasMessageContaining("Driver is not available");
 
-        verify(vehicleRepository, never()).findById(any());
-        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+        verify(vehicleRepository, never()).findLockedById(any());
+        verifyNoIntent();
     }
 
     @Test
     @DisplayName("a vehicle already IN_USE cannot be assigned")
     void rejectsVehicleInUse() {
         Delivery delivery = delivery(DeliveryStatus.CREATED);
-        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
-        when(driverRepository.findById(DRIVER_ID))
+        when(deliveryRepository.findLockedById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+        when(driverRepository.findLockedById(DRIVER_ID))
                 .thenReturn(Optional.of(driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE)));
         when(deliveryRepository.existsByDriverIdAndStatusIn(DRIVER_ID, DeliveryStatus.OPEN)).thenReturn(false);
-        when(vehicleRepository.findById(VEHICLE_ID))
+        when(vehicleRepository.findLockedById(VEHICLE_ID))
                 .thenReturn(Optional.of(vehicle(VEHICLE_ID, VehicleStatus.IN_USE)));
 
         assertThatThrownBy(() -> deliveryService.assign(DRIVER_ID, VEHICLE_ID, DELIVERY_ID))
@@ -171,15 +187,15 @@ class DeliveryServiceTest {
                 .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.CONFLICT))
                 .hasMessageContaining("Vehicle is not available");
 
-        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+        verifyNoIntent();
     }
 
     @Test
     @DisplayName("a driver already on an open delivery cannot take another one")
     void rejectsDriverWithActiveDelivery() {
         Delivery delivery = delivery(DeliveryStatus.CREATED);
-        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
-        when(driverRepository.findById(DRIVER_ID))
+        when(deliveryRepository.findLockedById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+        when(driverRepository.findLockedById(DRIVER_ID))
                 .thenReturn(Optional.of(driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE)));
         when(deliveryRepository.existsByDriverIdAndStatusIn(DRIVER_ID, DeliveryStatus.OPEN)).thenReturn(true);
 
@@ -188,7 +204,7 @@ class DeliveryServiceTest {
                 .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.CONFLICT))
                 .hasMessageContaining("Driver is not available");
 
-        verify(vehicleRepository, never()).findById(any());
+        verify(vehicleRepository, never()).findLockedById(any());
     }
 
     @Test
@@ -207,7 +223,7 @@ class DeliveryServiceTest {
                 .hasMessageContaining("DELIVERED")
                 .hasMessageContaining("IN_TRANSIT");
 
-        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+        verifyNoIntent();
     }
 
     @Test
@@ -223,7 +239,7 @@ class DeliveryServiceTest {
                 .isInstanceOf(BusinessException.class)
                 .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN));
 
-        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+        verifyNoIntent();
     }
 
     @Test
@@ -240,7 +256,7 @@ class DeliveryServiceTest {
                 .isInstanceOf(BusinessException.class)
                 .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN));
 
-        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+        verifyNoIntent();
     }
 
     @Test
@@ -257,7 +273,29 @@ class DeliveryServiceTest {
                 .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN));
 
         verify(driverRepository, never()).findById(any());
-        verify(eventPublisher, never()).publish(anyString(), anyString(), any());
+        verifyNoIntent();
+    }
+
+    @Test
+    @DisplayName("the generic status endpoint may not be used to reach ASSIGNED")
+    void refusesToAssignThroughTheStatusEndpoint() {
+        Delivery delivery = delivery(DeliveryStatus.CREATED);
+        delivery.setDriverId(null);
+        delivery.setVehicleId(null);
+        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+
+        // Staff may reach any state through this route, and ASSIGNED is a legal edge out
+        // of CREATED, so without an explicit refusal this would park the delivery at
+        // ASSIGNED with no crew, no crew announcement and nobody able to move it on.
+        assertThatThrownBy(() -> deliveryService.changeStatus(DELIVERY_ID, "ASSIGNED", null,
+                OTHER_DRIVER_USER_ID, FleetRole.OPERATIONS))
+                .isInstanceOf(InvalidStateTransitionException.class)
+                .hasMessageContaining("ASSIGNED");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.CREATED);
+        verify(driverRepository, never()).findById(any());
+        verify(vehicleRepository, never()).findById(any());
+        verifyNoIntent();
     }
 
     @Test
@@ -269,11 +307,10 @@ class DeliveryServiceTest {
 
         deliveryService.changeStatus(DELIVERY_ID, "PICKED_UP", null, DRIVER_USER_ID, FleetRole.DRIVER);
 
-        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
-        assertThat(topicCaptor.getValue()).isEqualTo("delivery.picked-up");
+        OutboundDeliveryEvent intent = singleIntent();
+        assertThat(intent.topic()).isEqualTo("delivery.picked-up");
 
-        DeliveryStatusChangedPayload payload =
-                (DeliveryStatusChangedPayload) envelopeCaptor.getValue().payload();
+        DeliveryStatusChangedPayload payload = (DeliveryStatusChangedPayload) intent.envelope().payload();
         assertThat(payload.previousStatus()).isEqualTo("ASSIGNED");
         assertThat(payload.newStatus()).isEqualTo("PICKED_UP");
         assertThat(payload.driverId()).isEqualTo(DRIVER_ID);
@@ -281,7 +318,7 @@ class DeliveryServiceTest {
     }
 
     @Test
-    @DisplayName("a transition before any assignment publishes a null driver identity")
+    @DisplayName("a transition before any assignment announces a null driver identity")
     void staffCancellationOfAnUnassignedDeliveryPublishesNoDriver() {
         Delivery delivery = delivery(DeliveryStatus.CREATED);
         delivery.setDriverId(null);
@@ -291,11 +328,10 @@ class DeliveryServiceTest {
         deliveryService.changeStatus(DELIVERY_ID, "CANCELLED", "Customer changed their mind",
                 OTHER_DRIVER_USER_ID, FleetRole.OPERATIONS);
 
-        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
-        assertThat(topicCaptor.getValue()).isEqualTo("delivery.cancelled");
+        OutboundDeliveryEvent intent = singleIntent();
+        assertThat(intent.topic()).isEqualTo("delivery.cancelled");
 
-        DeliveryStatusChangedPayload payload =
-                (DeliveryStatusChangedPayload) envelopeCaptor.getValue().payload();
+        DeliveryStatusChangedPayload payload = (DeliveryStatusChangedPayload) intent.envelope().payload();
         assertThat(payload.driverId()).isNull();
         assertThat(payload.driverUserId()).isNull();
     }
@@ -320,7 +356,7 @@ class DeliveryServiceTest {
     }
 
     @Test
-    @DisplayName("completing a delivery frees the driver and the vehicle and publishes delivery.completed")
+    @DisplayName("completing a delivery frees the driver and the vehicle and announces delivery.completed")
     void completingFreesResourcesAndPublishes() {
         Delivery delivery = delivery(DeliveryStatus.IN_TRANSIT);
         delivery.setStartedAt(Instant.now().minusSeconds(3600));
@@ -338,11 +374,11 @@ class DeliveryServiceTest {
         assertThat(driver.getStatus()).isEqualTo(DriverStatus.AVAILABLE);
         assertThat(vehicle.getStatus()).isEqualTo(VehicleStatus.AVAILABLE);
 
-        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
-        assertThat(topicCaptor.getValue()).isEqualTo("delivery.completed");
-        assertThat(envelopeCaptor.getValue().eventType()).isEqualTo(EventTypes.DELIVERY_COMPLETED);
+        OutboundDeliveryEvent intent = singleIntent();
+        assertThat(intent.topic()).isEqualTo("delivery.completed");
+        assertThat(intent.envelope().eventType()).isEqualTo(EventTypes.DELIVERY_COMPLETED);
 
-        DeliveryCompletedPayload payload = (DeliveryCompletedPayload) envelopeCaptor.getValue().payload();
+        DeliveryCompletedPayload payload = (DeliveryCompletedPayload) intent.envelope().payload();
         assertThat(payload.deliveryId()).isEqualTo(DELIVERY_ID);
         assertThat(payload.orderId()).isEqualTo(ORDER_ID);
         assertThat(payload.driverId()).isEqualTo(DRIVER_ID);
@@ -352,7 +388,7 @@ class DeliveryServiceTest {
     }
 
     @Test
-    @DisplayName("a failing attempt frees the crew and publishes delivery.failed with the reason")
+    @DisplayName("a failing attempt frees the crew and announces delivery.failed with the reason")
     void failingFreesResourcesAndCarriesTheReason() {
         Delivery delivery = delivery(DeliveryStatus.IN_TRANSIT);
         Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.ON_DELIVERY);
@@ -365,12 +401,26 @@ class DeliveryServiceTest {
         assertThat(response.failureReason()).isEqualTo("Customer absent");
         assertThat(driver.getStatus()).isEqualTo(DriverStatus.AVAILABLE);
         assertThat(vehicle.getStatus()).isEqualTo(VehicleStatus.AVAILABLE);
-        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
-        assertThat(topicCaptor.getValue()).isEqualTo("delivery.failed");
+        assertThat(singleIntent().topic()).isEqualTo("delivery.failed");
     }
 
     @Test
-    @DisplayName("IN_TRANSIT records the start time and publishes delivery.started")
+    @DisplayName("cancelling a delivery frees the crew too")
+    void cancellingFreesResources() {
+        Delivery delivery = delivery(DeliveryStatus.ASSIGNED);
+        Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.ON_DELIVERY);
+        Vehicle vehicle = vehicle(VEHICLE_ID, VehicleStatus.IN_USE);
+        givenDelivery(delivery, driver, vehicle);
+
+        deliveryService.changeStatus(DELIVERY_ID, "CANCELLED", "Customer changed their mind",
+                OTHER_DRIVER_USER_ID, FleetRole.OPERATIONS);
+
+        assertThat(driver.getStatus()).isEqualTo(DriverStatus.AVAILABLE);
+        assertThat(vehicle.getStatus()).isEqualTo(VehicleStatus.AVAILABLE);
+    }
+
+    @Test
+    @DisplayName("IN_TRANSIT records the start time and announces delivery.started")
     void inTransitRecordsStartTime() {
         Delivery delivery = delivery(DeliveryStatus.PICKED_UP);
         Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.ON_DELIVERY);
@@ -382,20 +432,19 @@ class DeliveryServiceTest {
 
         assertThat(response.startedAt()).isNotNull();
         assertThat(driver.getStatus()).isEqualTo(DriverStatus.ON_DELIVERY);
-        verify(eventPublisher).publish(topicCaptor.capture(), eq(String.valueOf(ORDER_ID)), envelopeCaptor.capture());
-        assertThat(topicCaptor.getValue()).isEqualTo("delivery.started");
+        assertThat(singleIntent().topic()).isEqualTo("delivery.started");
     }
 
     @Test
     @DisplayName("a delivery can only be assigned while it is CREATED")
     void rejectsAssigningAnAlreadyAssignedDelivery() {
         Delivery delivery = delivery(DeliveryStatus.ASSIGNED);
-        when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+        when(deliveryRepository.findLockedById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
 
         assertThatThrownBy(() -> deliveryService.assign(DRIVER_ID, VEHICLE_ID, DELIVERY_ID))
                 .isInstanceOf(InvalidStateTransitionException.class);
 
-        verify(driverRepository, never()).findById(any());
+        verify(driverRepository, never()).findLockedById(any());
     }
 
     @Test
@@ -405,7 +454,7 @@ class DeliveryServiceTest {
         delivery.setFailureReason("Customer absent");
         Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE);
         Vehicle vehicle = vehicle(VEHICLE_ID, VehicleStatus.AVAILABLE);
-        givenDelivery(delivery, driver, vehicle);
+        givenLockedDelivery(delivery, driver, vehicle);
 
         DeliveryResponse response = deliveryService.requeue(DELIVERY_ID, "Second attempt");
 
@@ -415,12 +464,109 @@ class DeliveryServiceTest {
         assertThat(response.failureReason()).isEqualTo("Customer absent");
     }
 
+    @Test
+    @DisplayName("requeue re-announces the crew on delivery.assigned, which is what re-opens tracking")
+    void requeueAnnouncesTheCrew() {
+        Delivery delivery = delivery(DeliveryStatus.FAILED);
+        Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE);
+        Vehicle vehicle = vehicle(VEHICLE_ID, VehicleStatus.AVAILABLE);
+        givenLockedDelivery(delivery, driver, vehicle);
+
+        deliveryService.requeue(DELIVERY_ID, "Second attempt");
+
+        // tracking-service only sets trackingEnabled back to true when it sees this event,
+        // so a silent requeue leaves a live delivery with tracking permanently closed.
+        OutboundDeliveryEvent intent = singleIntent();
+        assertThat(intent.topic()).isEqualTo("delivery.assigned");
+        assertThat(intent.envelope().eventType()).isEqualTo(EventTypes.DELIVERY_ASSIGNED);
+
+        DeliveryAssignedPayload payload = (DeliveryAssignedPayload) intent.envelope().payload();
+        assertThat(payload.driverId()).isEqualTo(DRIVER_ID);
+        assertThat(payload.driverUserId()).isEqualTo(DRIVER_USER_ID);
+        assertThat(payload.vehicleId()).isEqualTo(VEHICLE_ID);
+    }
+
+    @Test
+    @DisplayName("requeue reads all three rows under a write lock")
+    void requeueReadsEverythingUnderAWriteLock() {
+        Delivery delivery = delivery(DeliveryStatus.FAILED);
+        Driver driver = driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE);
+        givenLockedDelivery(delivery, driver, vehicle(VEHICLE_ID, VehicleStatus.AVAILABLE));
+
+        deliveryService.requeue(DELIVERY_ID, "Second attempt");
+
+        verify(deliveryRepository).findLockedById(DELIVERY_ID);
+        verify(driverRepository).findLockedById(DRIVER_ID);
+        verify(vehicleRepository).findLockedById(VEHICLE_ID);
+        verify(driverRepository, never()).findById(any());
+        verify(vehicleRepository, never()).findById(any());
+    }
+
+    @Test
+    @DisplayName("requeue refuses a crew that has already been given another delivery")
+    void requeueRefusesAnUnavailableDriver() {
+        Delivery delivery = delivery(DeliveryStatus.FAILED);
+        when(deliveryRepository.findLockedById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+        when(driverRepository.findLockedById(DRIVER_ID))
+                .thenReturn(Optional.of(driver(DRIVER_ID, DRIVER_USER_ID, DriverStatus.AVAILABLE)));
+        when(deliveryRepository.existsByDriverIdAndStatusIn(DRIVER_ID, DeliveryStatus.OPEN)).thenReturn(true);
+
+        assertThatThrownBy(() -> deliveryService.requeue(DELIVERY_ID, "Second attempt"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("Driver is not available");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        verify(vehicleRepository, never()).findLockedById(any());
+        verifyNoIntent();
+    }
+
+    @Test
+    @DisplayName("a negative page index is a 400, not a 500 from PageRequest")
+    void refusesANegativePageIndex() {
+        assertThatThrownBy(() -> deliveryService.search(null, null, null, null, null, -1, 20))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST))
+                .hasMessageContaining("page");
+
+        verify(deliveryRepository, never()).search(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("a non-positive or absurd page size is a 400, not a 500 or the whole table")
+    void refusesAnUnusablePageSize() {
+        assertThatThrownBy(() -> deliveryService.search(null, null, null, null, null, 0, 0))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST));
+        assertThatThrownBy(() -> deliveryService.search(null, null, null, null, null, 0, 5_000_000))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getErrorCode()).isEqualTo(ErrorCode.BAD_REQUEST))
+                .hasMessageContaining("200");
+
+        verify(deliveryRepository, never()).search(any(), any(), any(), any(), any(), any());
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void givenDelivery(Delivery delivery, Driver driver, Vehicle vehicle) {
         when(deliveryRepository.findById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
         when(driverRepository.findById(DRIVER_ID)).thenReturn(Optional.of(driver));
         when(vehicleRepository.findById(VEHICLE_ID)).thenReturn(Optional.of(vehicle));
+    }
+
+    private void givenLockedDelivery(Delivery delivery, Driver driver, Vehicle vehicle) {
+        when(deliveryRepository.findLockedById(DELIVERY_ID)).thenReturn(Optional.of(delivery));
+        when(driverRepository.findLockedById(DRIVER_ID)).thenReturn(Optional.of(driver));
+        when(vehicleRepository.findLockedById(VEHICLE_ID)).thenReturn(Optional.of(vehicle));
+    }
+
+    /** The one intent the operation under test recorded, failing if it recorded none or several. */
+    private OutboundDeliveryEvent singleIntent() {
+        verify(applicationEvents).publishEvent(intentCaptor.capture());
+        return intentCaptor.getValue();
+    }
+
+    private void verifyNoIntent() {
+        verify(applicationEvents, never()).publishEvent(any(Object.class));
     }
 
     private static Delivery delivery(DeliveryStatus status) {

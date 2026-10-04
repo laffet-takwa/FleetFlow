@@ -119,7 +119,7 @@ public class NotificationService {
         sseRegistry.pushUnreadCount(userId, repository.countByUserIdAndReadFalse(userId));
     }
 
-    /** Flips every unread row of the user and tells the open streams the badge is empty. */
+    /** Flips every unread row of the user and tells the open streams what the badge holds. */
     @Transactional
     public void markAllAsRead(long userId) {
         requireSelf(userId);
@@ -129,7 +129,10 @@ public class NotificationService {
         }
         unread.forEach(notification -> notification.setRead(true));
         repository.saveAll(unread);
-        sseRegistry.pushReadAll(userId);
+        // The count is queried rather than assumed to be zero: a notification a consumer
+        // committed while this transaction was open is still unread, and no later event
+        // would correct a badge that claims otherwise, because create() pushes no count.
+        sseRegistry.pushReadAll(userId, repository.countByUserIdAndReadFalse(userId));
         log.info("Marked {} notifications as read for userId={} [correlationId={}]",
                 unread.size(), userId, CorrelationId.getOrCreate());
     }

@@ -24,7 +24,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * keeps the trust boundary easy to audit.
  *
  * <p>Verification is constant time, checks the signature before parsing any claim,
- * and refuses tokens whose issuer or expiry does not match.
+ * and refuses tokens whose issuer, role or expiry shape does not match. The signing
+ * algorithm is fixed here and never read back out of the header, so neither an
+ * {@code alg: none} token nor an algorithm substitution can be honoured.
  */
 @Component
 public class JwtService {
@@ -49,12 +51,20 @@ public class JwtService {
 
     /** Claims extracted from a verified token. */
     public record Claims(Long userId, String email, FleetRole role, String issuer, Instant issuedAt, Instant expiresAt) {
+        /**
+         * @param clockSkew tolerance for a token that expired moments ago on an issuer
+         *                  whose clock runs slightly ahead
+         */
         public boolean isExpired(Duration clockSkew) {
-            return expiresAt != null && Instant.now().isAfter(expiresAt.plus(clockSkew));
+            return Instant.now().isAfter(expiresAt.plus(clockSkew));
         }
     }
 
     public String generateToken(Long userId, String email, FleetRole role) {
+        if (role == null) {
+            // Issuing a token that parse() refuses would lock the account out silently.
+            throw new IllegalArgumentException("A role is required to issue an access token");
+        }
         Instant issuedAt = Instant.now();
         Instant expiresAt = issuedAt.plus(properties.getAccessTokenTtl());
 
@@ -65,7 +75,7 @@ public class JwtService {
         Map<String, Object> claims = new LinkedHashMap<>();
         claims.put(CLAIM_SUBJECT, userId);
         claims.put(CLAIM_EMAIL, email);
-        claims.put(CLAIM_ROLE, role == null ? null : role.name());
+        claims.put(CLAIM_ROLE, role.name());
         claims.put(CLAIM_ISSUER, properties.getIssuer());
         claims.put(CLAIM_ISSUED_AT, issuedAt.getEpochSecond());
         claims.put(CLAIM_EXPIRES_AT, expiresAt.getEpochSecond());
@@ -109,14 +119,25 @@ public class JwtService {
             }
             Number issuedAt = (Number) claims.get(CLAIM_ISSUED_AT);
             Number expiresAt = (Number) claims.get(CLAIM_EXPIRES_AT);
-            Instant expiry = expiresAt == null ? null : Instant.ofEpochSecond(expiresAt.longValue());
+            if (expiresAt == null) {
+                // A token with no expiry would verify forever; refuse rather than treat
+                // a missing claim as "does not expire".
+                return Optional.empty();
+            }
+            FleetRole role = FleetRole.from((String) claims.get(CLAIM_ROLE));
+            if (role == null) {
+                // A role outside the platform vocabulary cannot be mapped onto an
+                // authority, and admitting it would yield an authenticated caller that
+                // every role rule silently declines to reason about.
+                return Optional.empty();
+            }
             return Optional.of(new Claims(
                     subject.longValue(),
                     (String) claims.get(CLAIM_EMAIL),
-                    FleetRole.from((String) claims.get(CLAIM_ROLE)),
+                    role,
                     issuer,
                     issuedAt == null ? null : Instant.ofEpochSecond(issuedAt.longValue()),
-                    expiry));
+                    Instant.ofEpochSecond(expiresAt.longValue())));
         } catch (Exception ex) {
             return Optional.empty();
         }

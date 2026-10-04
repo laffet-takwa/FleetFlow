@@ -2,6 +2,8 @@ package com.fleetflow.warehouse.entity;
 
 import java.time.Instant;
 
+import org.hibernate.annotations.BatchSize;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.FetchType;
@@ -22,6 +24,10 @@ import jakarta.persistence.Table;
  * {@code updated_at}. Both quantities are guarded by CHECK constraints in the
  * migration as well as by the methods below: the database is the last line of
  * defence when two consumers race.
+ *
+ * <p>Both associations are batch fetched because every read path maps a whole page of
+ * these rows and the mapper needs the site and the product for each one; without it a
+ * page of 200 rows would trigger 400 further selects.
  */
 @Entity
 @Table(name = "inventory")
@@ -33,10 +39,12 @@ public class Inventory {
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "warehouse_id", nullable = false)
+    @BatchSize(size = 100)
     private Warehouse warehouse;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "product_id", nullable = false)
+    @BatchSize(size = 100)
     private Product product;
 
     @Column(name = "available_quantity", nullable = false)

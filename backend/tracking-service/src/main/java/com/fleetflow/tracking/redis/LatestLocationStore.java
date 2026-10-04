@@ -60,15 +60,27 @@ public class LatestLocationStore {
     }
 
     public Optional<LocationResponse> get(long deliveryId) {
-        String value = redisTemplate.opsForValue().get(key(deliveryId));
-        if (value == null) {
+        try {
+            String value = redisTemplate.opsForValue().get(key(deliveryId));
+            if (value == null) {
+                return Optional.empty();
+            }
+            return Optional.ofNullable(deserialise(value, deliveryId));
+        } catch (RuntimeException ex) {
+            // An unreachable Redis is a cache miss, not a failed request: the caller falls
+            // back to the MongoDB trail. Without this the read path would answer 500 while
+            // the write path shrugs the same outage off.
+            log.warn("Could not read the cached location for delivery {}: {}", deliveryId, ex.getMessage());
             return Optional.empty();
         }
-        return Optional.ofNullable(deserialise(value, deliveryId));
     }
 
     public void delete(long deliveryId) {
-        redisTemplate.delete(key(deliveryId));
+        try {
+            redisTemplate.delete(key(deliveryId));
+        } catch (RuntimeException ex) {
+            log.warn("Could not evict the cached location for delivery {}: {}", deliveryId, ex.getMessage());
+        }
     }
 
     /**
@@ -82,8 +94,13 @@ public class LatestLocationStore {
             return Map.of();
         }
         List<Long> ids = List.copyOf(deliveryIds);
-        List<String> keys = ids.stream().map(this::key).toList();
-        List<String> values = redisTemplate.opsForValue().multiGet(keys);
+        List<String> values;
+        try {
+            values = redisTemplate.opsForValue().multiGet(ids.stream().map(this::key).toList());
+        } catch (RuntimeException ex) {
+            log.warn("Could not read cached locations for {} deliveries: {}", ids.size(), ex.getMessage());
+            return Map.of();
+        }
         if (values == null) {
             return Map.of();
         }

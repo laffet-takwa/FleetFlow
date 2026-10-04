@@ -70,6 +70,8 @@ public class GatewaySecurityConfig {
     private static Mono<Void> writeError(ServerWebExchange exchange, HttpStatus status, String error, String message) {
         exchange.getResponse().setStatusCode(status);
         exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
+        String correlationId = CorrelationId.resolveOrCreate(
+                exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
         String payload = ("{\"timestamp\":\"%s\",\"status\":%d,\"error\":\"%s\",\"message\":\"%s\","
                 + "\"path\":\"%s\",\"correlationId\":\"%s\"}")
                 .formatted(
@@ -78,7 +80,7 @@ public class GatewaySecurityConfig {
                         error,
                         message,
                         exchange.getRequest().getPath().value(),
-                        exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
+                        correlationId);
         DataBuffer buffer = exchange.getResponse().bufferFactory()
                 .wrap(payload.getBytes(StandardCharsets.UTF_8));
         return exchange.getResponse().writeWith(Mono.just(buffer));

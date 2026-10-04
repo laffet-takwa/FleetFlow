@@ -83,6 +83,10 @@ public class JwtAuthenticationWebFilter implements WebFilter {
 
     /** Emits the same error shape as the services, so clients parse failures uniformly. */
     private String body(ServerWebExchange exchange, String message) {
+        // resolveOrCreate, not getFirst: this body is assembled by string concatenation,
+        // so the id must be a value that cannot terminate the JSON object.
+        String correlationId = CorrelationId.resolveOrCreate(
+                exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
         return ("{\"timestamp\":\"%s\",\"status\":%d,\"error\":\"TOKEN_INVALID\",\"message\":\"%s\","
                 + "\"path\":\"%s\",\"correlationId\":\"%s\"}")
                 .formatted(
@@ -90,6 +94,6 @@ public class JwtAuthenticationWebFilter implements WebFilter {
                         HttpStatus.UNAUTHORIZED.value(),
                         message,
                         exchange.getRequest().getPath().value(),
-                        exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
+                        correlationId);
     }
 }

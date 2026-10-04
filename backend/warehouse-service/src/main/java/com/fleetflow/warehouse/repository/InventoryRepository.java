@@ -4,8 +4,11 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
+import jakarta.persistence.LockModeType;
+
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -16,6 +19,26 @@ public interface InventoryRepository extends JpaRepository<Inventory, Long>, Jpa
     Optional<Inventory> findByWarehouseIdAndProductId(Long warehouseId, Long productId);
 
     List<Inventory> findByWarehouseIdAndProductIdIn(Long warehouseId, Collection<Long> productIds);
+
+    /**
+     * The reservation path reads the levels it is about to decrement, so it must take the
+     * rows for update: without the lock two concurrent reservations both observe the same
+     * {@code availableQuantity} and the loser is only stopped by the CHECK constraint.
+     *
+     * <p>Ordered by id so a multi-line reservation always locks in the same order, which is
+     * what keeps two overlapping reservations from deadlocking.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    List<Inventory> findByWarehouseIdAndProductIdInOrderByIdAsc(Long warehouseId, Collection<Long> productIds);
+
+    /**
+     * A correction reads the level, adds a delta and writes it back. Unlocked, two
+     * concurrent corrections both read the old level and one increment is silently lost,
+     * because nothing about the arithmetic can violate a constraint.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select i from Inventory i where i.id = :id")
+    Optional<Inventory> findByIdForUpdate(@Param("id") Long id);
 
     List<Inventory> findByProductIdInOrderByAvailableQuantityAscIdAsc(Collection<Long> productIds);
 

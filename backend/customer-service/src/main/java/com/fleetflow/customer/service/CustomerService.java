@@ -1,9 +1,11 @@
 package com.fleetflow.customer.service;
 
 import java.util.Locale;
+import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -41,12 +43,30 @@ public class CustomerService {
      * <p>Registration and customer provisioning live in different services, so a user
      * can hold a valid token before their profile row exists. Provisioning here rather
      * than in an event listener means {@code /me} never fails for a legitimate caller.
+     *
+     * <p>Deliberately not {@code @Transactional}. {@code customers.user_id} is unique,
+     * so a second concurrent {@code /me} for the same user loses the insert. If that
+     * insert shared a transaction with the read that preceded it, the constraint
+     * violation would mark the transaction rollback-only and the loser could not read
+     * the row the winner had just committed — it would surface as a 500. Giving the
+     * insert its own transaction lets the loser recover and return the same profile.
      */
-    @Transactional
     public Customer getOrCreateCurrent() {
         JwtPrincipal principal = SecurityUtils.requirePrincipal();
-        return repository.findByUserId(principal.userId())
-                .orElseGet(() -> provisionSkeleton(principal));
+        Optional<Customer> existing = repository.findByUserId(principal.userId());
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        try {
+            return provisionSkeleton(principal);
+        } catch (DataIntegrityViolationException ex) {
+            // Lost the race against a concurrent request for the same user; the unique
+            // index arbitrated and the other transaction already committed.
+            log.info("Profile for userId={} was provisioned concurrently, reusing it [correlationId={}]",
+                    principal.userId(), CorrelationId.getOrCreate());
+            return repository.findByUserId(principal.userId())
+                    .orElseThrow(() -> ResourceNotFoundException.of("Customer for user", principal.userId()));
+        }
     }
 
     /**
@@ -59,9 +79,11 @@ public class CustomerService {
      * empty names is what the driver would see at the door.
      *
      * <p>Idempotent by {@code userId}: a repeat call updates the existing profile rather
-     * than creating a second one, so a retried registration cannot duplicate it.
+     * than creating a second one, so a retried registration cannot duplicate it. Not
+     * {@code @Transactional} for the same reason as {@link #getOrCreateCurrent()}: a
+     * repeat that races a lazy provision must be able to read the row the other
+     * transaction committed rather than fail on the unique index.
      */
-    @Transactional
     public Customer preCreate(CustomerProfilePreCreateRequest request) {
         Customer customer = repository.findByUserId(request.userId())
                 .orElseGet(() -> {
@@ -76,10 +98,27 @@ public class CustomerService {
         customer.setPhone(request.phone());
         customer.setAddress(request.address());
 
-        Customer saved = repository.saveAndFlush(customer);
-        log.info("Pre-created customer profile {} for userId={} [correlationId={}]",
-                saved.getId(), saved.getUserId(), CorrelationId.getOrCreate());
-        return saved;
+        try {
+            Customer saved = repository.saveAndFlush(customer);
+            log.info("Pre-created customer profile {} for userId={} [correlationId={}]",
+                    saved.getId(), saved.getUserId(), CorrelationId.getOrCreate());
+            return saved;
+        } catch (DataIntegrityViolationException ex) {
+            // Concurrent lazy provisioning won the unique index; apply the registration
+            // details to that row instead of failing a registration that already succeeded.
+            Customer existing = repository.findByUserId(request.userId())
+                    .orElseThrow(() -> ResourceNotFoundException.of("Customer for user", request.userId()));
+            existing.setFirstName(request.firstName());
+            existing.setLastName(request.lastName());
+            existing.setEmail(request.email());
+            existing.setPhone(request.phone());
+            existing.setAddress(request.address());
+            Customer saved = repository.saveAndFlush(existing);
+            log.info("Merged pre-created customer profile {} into the concurrently "
+                    + "provisioned row for userId={} [correlationId={}]",
+                    saved.getId(), request.userId(), CorrelationId.getOrCreate());
+            return saved;
+        }
     }
 
     private Customer provisionSkeleton(JwtPrincipal principal) {

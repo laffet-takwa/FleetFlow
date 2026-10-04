@@ -21,6 +21,7 @@ import com.fleetflow.delivery.dto.AssignDeliveryRequest;
 import com.fleetflow.delivery.dto.CreateDeliveryRequest;
 import com.fleetflow.delivery.dto.DeliveryCustomerContact;
 import com.fleetflow.delivery.dto.DeliveryKpiResponse;
+import com.fleetflow.delivery.dto.DeliveryReasonRequest;
 import com.fleetflow.delivery.dto.DeliveryResponse;
 import com.fleetflow.delivery.dto.UpdateDeliveryStatusRequest;
 import com.fleetflow.delivery.service.DeliveryService;
@@ -125,7 +126,8 @@ public class DeliveryController {
     @PreAuthorize(STAFF_OR_DRIVER)
     @Operation(summary = "Move a delivery to another status",
             description = "A driver may only move their own delivery; staff may move any. "
-                    + "Completing, failing or cancelling releases the driver and the vehicle.")
+                    + "Completing, failing or cancelling releases the driver and the vehicle. "
+                    + "ASSIGNED is not accepted here: it allocates the crew, so use /assign or /requeue.")
     @ApiResponse(responseCode = "409", description = "The status machine does not allow this transition")
     @ApiResponse(responseCode = "403", description = "The delivery is not assigned to the calling driver")
     public DeliveryResponse changeStatus(@PathVariable Long id,
@@ -138,7 +140,9 @@ public class DeliveryController {
     @PostMapping("/{id}/cancel")
     @PreAuthorize(STAFF)
     @Operation(summary = "Cancel a delivery", description = "Terminal; the driver and vehicle go back to AVAILABLE.")
-    public DeliveryResponse cancel(@PathVariable Long id, @RequestBody UpdateDeliveryStatusRequest request) {
+    @ApiResponse(responseCode = "409", description = "The delivery has already finished")
+    public DeliveryResponse cancel(@PathVariable Long id,
+            @Valid @RequestBody(required = false) DeliveryReasonRequest request) {
         return deliveryService.changeStatus(id, "CANCELLED", request == null ? null : request.reason(),
                 SecurityUtils.requireUserId(), SecurityUtils.currentRole());
     }
@@ -146,10 +150,11 @@ public class DeliveryController {
     @PostMapping("/{id}/requeue")
     @PreAuthorize(STAFF)
     @Operation(summary = "Requeue a failed delivery",
-            description = "FAILED to ASSIGNED with the same crew. Staff only.")
+            description = "FAILED to ASSIGNED with the same crew. Staff only. Re-announces the crew on "
+                    + "delivery.assigned so live tracking re-opens.")
     @ApiResponse(responseCode = "409", description = "The delivery is not FAILED, or the crew is unavailable")
     public DeliveryResponse requeue(@PathVariable Long id,
-            @RequestBody(required = false) UpdateDeliveryStatusRequest request) {
+            @Valid @RequestBody(required = false) DeliveryReasonRequest request) {
         return deliveryService.requeue(id, request == null ? null : request.reason());
     }
 }

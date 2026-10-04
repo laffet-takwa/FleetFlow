@@ -80,12 +80,15 @@ public class FleetFlowWebAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "internalServiceAuthFilterRegistration")
     public FilterRegistrationBean<InternalServiceAuthFilter> internalServiceAuthFilterRegistration(
-            InternalServiceAuthFilter filter) {
+            InternalServiceAuthFilter filter, InternalTokenProperties internalTokenProperties) {
         FilterRegistrationBean<InternalServiceAuthFilter> registration = new FilterRegistrationBean<>(filter);
         // Ahead of the security chain, so an unauthenticated internal call is rejected
         // outright rather than reaching any endpoint.
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 1);
-        registration.addUrlPatterns(InternalTokenProperties.DEFAULT_PATH_PREFIX + "**");
+        // Registered from the configured prefix, not the default one: a deployment that
+        // moves the paths would otherwise leave the filter attached to a prefix nothing
+        // serves, which is indistinguishable from having no gate at all.
+        registration.addUrlPatterns(internalTokenProperties.getPathPrefix() + "**");
         return registration;
     }
 

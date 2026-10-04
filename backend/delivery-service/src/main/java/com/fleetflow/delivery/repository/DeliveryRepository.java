@@ -8,13 +8,27 @@ import java.util.Optional;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import com.fleetflow.delivery.entity.Delivery;
 import com.fleetflow.delivery.entity.DeliveryStatus;
 
+import jakarta.persistence.LockModeType;
+
 public interface DeliveryRepository extends JpaRepository<Delivery, Long> {
+
+    /**
+     * Read for update, for the paths that decide whether a delivery may still be given
+     * to somebody. Two concurrent assign or requeue calls for the same delivery would
+     * otherwise both read {@code CREATED} or {@code FAILED} and both write: the loser of
+     * the row write would leave its driver stuck at {@code ON_DELIVERY} with no delivery
+     * of its own. Requires an active transaction, which every caller already has.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select d from Delivery d where d.id = :id")
+    Optional<Delivery> findLockedById(@Param("id") Long id);
 
     Optional<Delivery> findByOrderId(Long orderId);
 

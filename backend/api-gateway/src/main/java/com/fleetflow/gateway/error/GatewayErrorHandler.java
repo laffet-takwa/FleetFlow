@@ -43,11 +43,11 @@ public class GatewayErrorHandler implements ErrorWebExceptionHandler {
 
         // The correlation id is resolved the same way the filter resolves it, so a
         // request that arrived without one still gets a stable id in the error body —
-        // and it is never rendered as the literal string "null".
-        String correlationId = exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER);
-        if (correlationId == null || correlationId.isBlank()) {
-            correlationId = CorrelationId.newId();
-        }
+        // and it is never rendered as the literal string "null". resolveOrCreate also
+        // constrains it to identifier characters, which matters because the body below
+        // is assembled by string concatenation.
+        String correlationId = CorrelationId.resolveOrCreate(
+                exchange.getRequest().getHeaders().getFirst(CorrelationId.HEADER));
 
         // A 5xx is ours, not the caller's: log the throwable so the cause is
         // diagnosable. The client still receives only the generic message.

@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -52,13 +54,16 @@ public class NotificationEventListener {
     private final NotificationService notificationService;
     private final IdempotencyService idempotencyService;
     private final NotificationProperties properties;
+    private final TransactionTemplate transactionTemplate;
 
     public NotificationEventListener(ObjectMapper objectMapper, NotificationService notificationService,
-            IdempotencyService idempotencyService, NotificationProperties properties) {
+            IdempotencyService idempotencyService, NotificationProperties properties,
+            PlatformTransactionManager transactionManager) {
         this.objectMapper = objectMapper;
         this.notificationService = notificationService;
         this.idempotencyService = idempotencyService;
         this.properties = properties;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     @KafkaListener(topics = "${fleetflow.kafka.topics.order-created}",
@@ -198,12 +203,23 @@ public class NotificationEventListener {
      * <p>Kafka delivers at least once, so without {@link IdempotencyService} a
      * redelivered event would show the customer the same notification twice - and the
      * same would happen to the staff copy.
+     *
+     * <p>The rows the handler writes and the {@code processed_event} row are written in
+     * one transaction. {@link IdempotencyService} only records the event id after the
+     * action has returned, so committing them separately leaves a window in which a
+     * crash - or a failure on the second of the two notifications an assignment produces -
+     * redelivers an event whose notification is already stored, and writes it twice.
+     *
+     * <p>The transaction is opened through a {@link TransactionTemplate} rather than
+     * {@code @Transactional} on this method: it is private and self-invoked, so the
+     * proxy would never be consulted.
      */
     private <T> void consume(String json, TypeReference<EventEnvelope<T>> envelopeType, Consumer<T> handler) {
         EventEnvelope<T> envelope = read(json, envelopeType);
         try (CorrelationIdScope ignored = CorrelationIdScope.open(envelope.correlationId())) {
-            idempotencyService.executeOnce(envelope.eventId(), envelope.eventType(),
-                    () -> handler.accept(envelope.payload()));
+            transactionTemplate.executeWithoutResult(status ->
+                    idempotencyService.executeOnce(envelope.eventId(), envelope.eventType(),
+                            () -> handler.accept(envelope.payload())));
         }
     }
 

@@ -14,11 +14,17 @@ import org.springframework.jdbc.core.JdbcTemplate;
  *
  * <p>Kafka guarantees at-least-once delivery, so the same {@code eventId} can arrive
  * more than once (broker restart, consumer rebalance, retry after a crash). Every
- * consumer wraps its handler with {@link #executeOnce}, which records the event id
- * in {@code processed_event} after the handler succeeded and skips it otherwise.
+ * consumer wraps its handler with {@link #executeOnce}, which claims the event id in
+ * {@code processed_event} and skips it if the claim is already held.
  *
- * <p>The record is written with {@code ON CONFLICT DO NOTHING}, so the check is a
- * single atomic statement and needs no distributed lock.
+ * <p>The claim is the {@code INSERT ... ON CONFLICT DO NOTHING} itself, not a
+ * preceding read: the database decides the single winner, so two concurrent
+ * deliveries of one event cannot both reach the handler.
+ *
+ * <p>If the handler throws, the claim is handed back so the broker's redelivery
+ * retries the event. The one exposure this creates is a hard crash of the process
+ * between the claim and the handler finishing: the event stays claimed until the row
+ * ages out of {@code processed_event}, and is then treated as already processed.
  */
 public class IdempotencyService {
 
@@ -33,6 +39,7 @@ public class IdempotencyService {
     // consumer, and would block the whole event flow.
     private static final String COUNT_SQL = "SELECT COUNT(*) FROM processed_event WHERE event_id = ?";
     private static final String DELETE_SQL = "DELETE FROM processed_event WHERE processed_at < ?";
+    private static final String RELEASE_SQL = "DELETE FROM processed_event WHERE event_id = ?";
 
     private final JdbcTemplate jdbcTemplate;
     private final AtomicLong invocations = new AtomicLong();
@@ -66,13 +73,29 @@ public class IdempotencyService {
      * @return {@code true} when the action actually ran
      */
     public boolean executeOnce(String eventId, String eventType, Runnable action) {
-        if (wasProcessed(eventId)) {
+        if (!markProcessed(eventId, eventType)) {
             log.debug("Skipping already processed event {} ({})", eventId, eventType);
             return false;
         }
-        action.run();
-        markProcessed(eventId, eventType);
-        return true;
+        try {
+            action.run();
+            return true;
+        } catch (RuntimeException | Error ex) {
+            release(eventId, ex);
+            throw ex;
+        }
+    }
+
+    /** Best effort: never let the rollback of a claim mask the failure that caused it. */
+    private void release(String eventId, RuntimeException | Error cause) {
+        try {
+            jdbcTemplate.update(RELEASE_SQL, eventId);
+        } catch (RuntimeException releaseFailure) {
+            log.warn("Could not release the idempotency claim for event {} [correlationId={}]",
+                    eventId, com.fleetflow.common.correlation.CorrelationId.getOrCreate(), releaseFailure);
+        }
+        log.debug("Released the idempotency claim for event {} after {}",
+                eventId, cause.getClass().getSimpleName());
     }
 
     public int purgeOlderThan(Duration age) {

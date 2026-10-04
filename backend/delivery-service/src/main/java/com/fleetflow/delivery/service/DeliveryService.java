@@ -10,8 +10,8 @@ import java.util.function.Function;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -19,7 +19,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.fleetflow.common.api.PageResponse;
 import com.fleetflow.common.correlation.CorrelationId;
-import com.fleetflow.common.event.DomainEventPublisher;
 import com.fleetflow.common.event.EventEnvelope;
 import com.fleetflow.common.event.EventTypes;
 import com.fleetflow.common.event.payload.DeliveryAssignedPayload;
@@ -46,6 +45,7 @@ import com.fleetflow.delivery.entity.Driver;
 import com.fleetflow.delivery.entity.DriverStatus;
 import com.fleetflow.delivery.entity.Vehicle;
 import com.fleetflow.delivery.entity.VehicleStatus;
+import com.fleetflow.delivery.kafka.OutboundDeliveryEvent;
 import com.fleetflow.delivery.mapper.DeliveryMapper;
 import com.fleetflow.delivery.repository.DeliveryRepository;
 import com.fleetflow.delivery.repository.DriverRepository;
@@ -62,16 +62,15 @@ public class DeliveryService {
     private final DeliveryRepository deliveryRepository;
     private final DriverRepository driverRepository;
     private final VehicleRepository vehicleRepository;
-    private final DomainEventPublisher eventPublisher;
+    private final ApplicationEventPublisher applicationEvents;
     private final KafkaTopicProperties topics;
     private final CustomerServiceClient customerServiceClient;
     private final WarehouseProperties warehouses;
     private final DeliveryMapper mapper;
 
     public DeliveryService(DeliveryRepository deliveryRepository,
-            DriverRepository driverRepository,
-            VehicleRepository vehicleRepository,
-            DomainEventPublisher eventPublisher,
+            DriverRepository driverRepository, VehicleRepository vehicleRepository,
+            ApplicationEventPublisher applicationEvents,
             KafkaTopicProperties topics,
             CustomerServiceClient customerServiceClient,
             WarehouseProperties warehouses,
@@ -79,7 +78,7 @@ public class DeliveryService {
         this.deliveryRepository = deliveryRepository;
         this.driverRepository = driverRepository;
         this.vehicleRepository = vehicleRepository;
-        this.eventPublisher = eventPublisher;
+        this.applicationEvents = applicationEvents;
         this.topics = topics;
         this.customerServiceClient = customerServiceClient;
         this.warehouses = warehouses;
@@ -92,7 +91,8 @@ public class DeliveryService {
             Instant from, Instant to, int page, int size) {
 
         DeliveryStatus parsed = status == null || status.isBlank() ? null : DeliveryStatus.from(status);
-        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+        Sort newestFirst = Sort.by(Sort.Direction.DESC, "createdAt");
+        Pageable pageable = PageBounds.of(page, size, newestFirst);
 
         // An absent date bound becomes a real timestamp rather than null. A query of the
         // form "(:from is null or createdAt >= :from)" gives Postgres a parameter whose
@@ -223,9 +223,18 @@ public class DeliveryService {
                 payload.orderId(), payload.warehouseName(), CorrelationId.getOrCreate());
     }
 
+    /**
+     * Hands a created delivery to a driver and a vehicle.
+     *
+     * <p>All three rows are read under a write lock: the delivery so only one request can
+     * decide its fate, the driver and the vehicle so the "is it free?" answer below is the
+     * one that gets written. Without the locks two concurrent requests both read
+     * {@code AVAILABLE}, both pass, and the driver ends up on two deliveries at once.
+     */
     @Transactional
     public DeliveryResponse assign(Long driverId, Long vehicleId, Long deliveryId) {
-        Delivery delivery = requireDelivery(deliveryId);
+        Delivery delivery = deliveryRepository.findLockedById(deliveryId)
+                .orElseThrow(() -> ResourceNotFoundException.of("Delivery", deliveryId));
         if (delivery.getStatus() != DeliveryStatus.CREATED) {
             // A FAILED delivery is requeued through the dedicated staff endpoint, which
             // keeps the reassignment path free of hidden state fixes.
@@ -233,14 +242,14 @@ public class DeliveryService {
                     delivery.getStatus().name(), DeliveryStatus.ASSIGNED.name());
         }
 
-        Driver driver = driverRepository.findById(driverId)
+        Driver driver = driverRepository.findLockedById(driverId)
                 .orElseThrow(() -> ResourceNotFoundException.of("Driver", driverId));
         if (driver.getStatus() != DriverStatus.AVAILABLE
                 || deliveryRepository.existsByDriverIdAndStatusIn(driverId, DeliveryStatus.OPEN)) {
             throw new BusinessException(ErrorCode.CONFLICT, "Driver is not available");
         }
 
-        Vehicle vehicle = vehicleRepository.findById(vehicleId)
+        Vehicle vehicle = vehicleRepository.findLockedById(vehicleId)
                 .orElseThrow(() -> ResourceNotFoundException.of("Vehicle", vehicleId));
         if (vehicle.getStatus() != VehicleStatus.AVAILABLE
                 || deliveryRepository.existsByVehicleIdAndStatusIn(vehicleId, DeliveryStatus.OPEN)) {
@@ -253,14 +262,7 @@ public class DeliveryService {
         driver.setStatus(DriverStatus.ON_DELIVERY);
         vehicle.setStatus(VehicleStatus.IN_USE);
 
-        String topic = topics.getDeliveryAssigned();
-        // driverId is this service's own key, driverUserId the platform identity consumers
-        // compare against the caller's JWT subject; the two are not interchangeable.
-        eventPublisher.publish(topic, String.valueOf(delivery.getOrderId()),
-                EventEnvelope.of(EventTypes.DELIVERY_ASSIGNED, topic,
-                        new DeliveryAssignedPayload(delivery.getId(), delivery.getOrderId(), delivery.getCustomerId(),
-                                driverId, driver.getUserId(), driver.getFullName(), vehicleId,
-                                vehicle.getRegistrationNumber())));
+        publishAssigned(delivery, driver, vehicle);
 
         log.info("Assigned delivery {} to driver {} with vehicle {} [correlationId={}]", deliveryId, driverId,
                 vehicleId, CorrelationId.getOrCreate());
@@ -273,6 +275,16 @@ public class DeliveryService {
 
         DeliveryStatus target = DeliveryStatus.from(status);
         Delivery delivery = requireDelivery(deliveryId);
+        if (target == DeliveryStatus.ASSIGNED) {
+            // Reaching ASSIGNED is what allocates a driver and a vehicle, and only
+            // assign() and requeue() do that: they take the locks, check both resources are
+            // free and announce the crew on delivery.assigned. Letting this generic
+            // endpoint set the flag alone would produce a delivery stuck at ASSIGNED with
+            // no driver, no vehicle and no event, invisible to /mine and to tracking, and
+            // un-completable because no driver is allowed to act on it.
+            throw new InvalidStateTransitionException("Delivery", deliveryId, delivery.getStatus().name(),
+                    DeliveryStatus.ASSIGNED.name());
+        }
         Driver driver = delivery.getDriverId() == null ? null
                 : driverRepository.findById(delivery.getDriverId())
                         .orElseThrow(() -> ResourceNotFoundException.of("Driver", delivery.getDriverId()));
@@ -312,21 +324,27 @@ public class DeliveryService {
 
     /**
      * Puts a failed delivery back on the road with the same crew. The driver and
-     * vehicle had been released when the attempt failed, so they are claimed again
-     * and checked for conflicts exactly like a fresh assignment.
+     * vehicle had been released when the attempt failed, so they are claimed again,
+     * under the same locks a fresh assignment takes, and checked for conflicts.
+     *
+     * <p>The delivery is ASSIGNED again with a driver and a vehicle on it, so this
+     * announces itself with {@code delivery.assigned} like any other allocation. Without
+     * it tracking-service, which only re-opens a delivery on that event, would keep the
+     * requeued delivery closed and refuse every position for it.
      */
     @Transactional
     public DeliveryResponse requeue(Long deliveryId, String reason) {
-        Delivery delivery = requireDelivery(deliveryId);
+        Delivery delivery = deliveryRepository.findLockedById(deliveryId)
+                .orElseThrow(() -> ResourceNotFoundException.of("Delivery", deliveryId));
         if (delivery.getStatus() != DeliveryStatus.FAILED) {
             throw new InvalidStateTransitionException("Delivery", deliveryId,
                     delivery.getStatus().name(), DeliveryStatus.ASSIGNED.name());
         }
         Driver driver = delivery.getDriverId() == null ? null
-                : driverRepository.findById(delivery.getDriverId())
+                : driverRepository.findLockedById(delivery.getDriverId())
                         .orElseThrow(() -> ResourceNotFoundException.of("Driver", delivery.getDriverId()));
         Vehicle vehicle = delivery.getVehicleId() == null ? null
-                : vehicleRepository.findById(delivery.getVehicleId())
+                : vehicleRepository.findLockedById(delivery.getVehicleId())
                         .orElseThrow(() -> ResourceNotFoundException.of("Vehicle", delivery.getVehicleId()));
 
         if (driver != null) {
@@ -346,12 +364,32 @@ public class DeliveryService {
 
         delivery.transitionTo(DeliveryStatus.ASSIGNED);
 
+        if (driver != null && vehicle != null) {
+            publishAssigned(delivery, driver, vehicle);
+        }
+
         log.info("Requeued failed delivery {} with reason '{}' [correlationId={}]", deliveryId, reason,
                 CorrelationId.getOrCreate());
         return mapper.toResponse(delivery, driver, vehicle);
     }
 
     // ----------------------------------------------------------------- helpers
+
+    /**
+     * Records the allocation as an intent to publish. Nothing reaches the bus from inside
+     * the transaction: {@link com.fleetflow.delivery.kafka.DeliveryEventRelay} sends it
+     * after the commit, so a transition that is rolled back never leaves this service.
+     */
+    private void publishAssigned(Delivery delivery, Driver driver, Vehicle vehicle) {
+        String topic = topics.getDeliveryAssigned();
+        // driverId is this service's own key, driverUserId the platform identity consumers
+        // compare against the caller's JWT subject; the two are not interchangeable.
+        applicationEvents.publishEvent(new OutboundDeliveryEvent(topic, String.valueOf(delivery.getOrderId()),
+                EventEnvelope.of(EventTypes.DELIVERY_ASSIGNED, topic,
+                        new DeliveryAssignedPayload(delivery.getId(), delivery.getOrderId(), delivery.getCustomerId(),
+                                driver.getId(), driver.getUserId(), driver.getFullName(), vehicle.getId(),
+                                vehicle.getRegistrationNumber()))));
+    }
 
     private void requireActor(Driver driver, Long actorUserId, FleetRole actorRole) {
         if (actorRole == FleetRole.DRIVER) {
@@ -412,12 +450,15 @@ public class DeliveryService {
                     topics.getDeliveryCancelled(), EventTypes.DELIVERY_CANCELLED);
             case DELIVERED -> {
                 String topic = topics.getDeliveryCompleted();
-                eventPublisher.publish(topic, key, EventEnvelope.of(EventTypes.DELIVERY_COMPLETED, topic,
-                        new DeliveryCompletedPayload(delivery.getId(), delivery.getOrderId(), delivery.getCustomerId(),
-                                driverId, driverUserId, now, delivery.getProofOfDelivery())));
+                applicationEvents.publishEvent(new OutboundDeliveryEvent(topic, key,
+                        EventEnvelope.of(EventTypes.DELIVERY_COMPLETED, topic,
+                                new DeliveryCompletedPayload(delivery.getId(), delivery.getOrderId(),
+                                        delivery.getCustomerId(), driverId, driverUserId, now,
+                                        delivery.getProofOfDelivery()))));
             }
             default -> {
-                // ASSIGNED and CREATED carry no notification of their own.
+                // ASSIGNED and CREATED carry no notification of their own: reaching ASSIGNED
+                // is announced by publishAssigned, which also knows the crew.
             }
         }
     }
@@ -425,9 +466,9 @@ public class DeliveryService {
     private void publishStatusChanged(Delivery delivery, Long driverId, Long driverUserId,
             DeliveryStatus previous, DeliveryStatus target, String reason, String key, String topic, String eventType) {
 
-        eventPublisher.publish(topic, key, EventEnvelope.of(eventType, topic,
+        applicationEvents.publishEvent(new OutboundDeliveryEvent(topic, key, EventEnvelope.of(eventType, topic,
                 new DeliveryStatusChangedPayload(delivery.getId(), delivery.getOrderId(), delivery.getCustomerId(),
-                        driverId, driverUserId, previous.name(), target.name(), reason)));
+                        driverId, driverUserId, previous.name(), target.name(), reason))));
     }
 
     private DeliveryResponse withDriverAndVehicle(Delivery delivery) {

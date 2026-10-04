@@ -44,10 +44,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     .ifPresent(claims -> {
                         JwtPrincipal principal =
                                 new JwtPrincipal(claims.userId(), claims.email(), claims.role());
-                        var authorities = claims.role() == null
-                                ? List.<SimpleGrantedAuthority>of()
-                                : List.of(new SimpleGrantedAuthority(claims.role().authority()));
-                        var authentication = new UsernamePasswordAuthenticationToken(principal, token, authorities);
+                        // parse() only yields a token whose role is in the platform
+                        // vocabulary, so the authority list is never empty here.
+                        var authentication = new UsernamePasswordAuthenticationToken(principal, token,
+                                List.of(new SimpleGrantedAuthority(claims.role().authority())));
                         SecurityContextHolder.getContext().setAuthentication(authentication);
                     });
         }

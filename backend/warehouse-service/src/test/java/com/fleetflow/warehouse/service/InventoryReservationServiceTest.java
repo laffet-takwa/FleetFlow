@@ -1,8 +1,10 @@
 package com.fleetflow.warehouse.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -10,16 +12,28 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.util.Collection;
 import java.util.List;
 
+import jakarta.persistence.LockModeType;
+
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.fleetflow.common.event.DomainEventPublisher;
 import com.fleetflow.common.event.EventEnvelope;
@@ -27,6 +41,7 @@ import com.fleetflow.common.event.payload.InventoryInsufficientPayload;
 import com.fleetflow.common.event.payload.InventoryInsufficientPayload.Shortfall;
 import com.fleetflow.common.event.payload.InventoryReservedPayload;
 import com.fleetflow.common.event.payload.OrderCreatedPayload;
+import com.fleetflow.common.exception.BusinessException;
 
 import com.fleetflow.warehouse.client.OrderServiceClient;
 import com.fleetflow.warehouse.client.OrderServiceClient.OrderLine;
@@ -37,6 +52,7 @@ import com.fleetflow.warehouse.entity.InventoryReservation;
 import com.fleetflow.warehouse.entity.Product;
 import com.fleetflow.warehouse.entity.Warehouse;
 import com.fleetflow.warehouse.entity.WarehouseStatus;
+import com.fleetflow.warehouse.kafka.InventoryEventPublisher;
 import com.fleetflow.warehouse.repository.InventoryRepository;
 import com.fleetflow.warehouse.repository.InventoryReservationRepository;
 import com.fleetflow.warehouse.repository.ProductRepository;
@@ -65,6 +81,7 @@ class InventoryReservationServiceTest {
     @Mock
     private DomainEventPublisher eventPublisher;
 
+    private AnnotationConfigApplicationContext eventContext;
     private InventoryReservationService reservationService;
 
     @BeforeEach
@@ -77,11 +94,23 @@ class InventoryReservationServiceTest {
         topics.setInventoryReserved(TOPIC_RESERVED);
         topics.setInventoryInsufficient(TOPIC_INSUFFICIENT);
 
+        // A real context rather than a mocked ApplicationEventPublisher, so the tests
+        // exercise the whole path: the service records an intent and the transactional
+        // listener is the thing that reaches the bus.
+        eventContext = new AnnotationConfigApplicationContext();
+        eventContext.registerBean(InventoryEventPublisher.class, () -> new InventoryEventPublisher(eventPublisher));
+        eventContext.refresh();
+
         reservationService = new InventoryReservationService(productRepository, inventoryRepository,
                 reservationRepository, orderServiceClient, warehouseService, reservationProperties, topics,
-                eventPublisher);
+                eventContext);
 
         when(warehouseService.getById(WAREHOUSE_ID)).thenReturn(warehouse());
+    }
+
+    @AfterEach
+    void tearDown() {
+        eventContext.close();
     }
 
     // ------------------------------------------------------------- happy path
@@ -187,7 +216,7 @@ class InventoryReservationServiceTest {
     void missingProductIsAShortfall() {
         givenOrder(List.of(new OrderLine(404L, 1)));
         when(productRepository.findAllById(any())).thenReturn(List.of());
-        when(inventoryRepository.findByWarehouseIdAndProductIdIn(any(), any())).thenReturn(List.of());
+        givenNoStock();
 
         reservationService.reserve(orderCreated());
 
@@ -227,6 +256,120 @@ class InventoryReservationServiceTest {
         verify(orderServiceClient, times(1)).findItemLines(anyLong());
     }
 
+    // --------------------------------------------------------------- isolation
+
+    @Nested
+    @DisplayName("concurrent reservations")
+    class Isolation {
+
+        @Test
+        @DisplayName("the levels are read under a pessimistic write lock")
+        void stockReadIsLockedForUpdate() throws Exception {
+            Method locking = InventoryRepository.class.getMethod(
+                    "findByWarehouseIdAndProductIdInOrderByIdAsc", Long.class, java.util.Collection.class);
+            Lock lock = locking.getAnnotation(Lock.class);
+
+            assertTrue(lock != null && lock.value() == LockModeType.PESSIMISTIC_WRITE,
+                    "without a write lock two reservations of the last unit both pass the check and the loser "
+                            + "only fails on the available_quantity CHECK constraint");
+
+            Product milk = product(1L, "FF-GR-0002", "Carton 6 x Brik UHT 1L", "8.500");
+            givenOrder(List.of(new OrderLine(1L, 3)), milk);
+            givenStock(stock(milk, 40, 0));
+            givenSavingReservations();
+
+            reservationService.reserve(orderCreated());
+
+            verify(inventoryRepository).findByWarehouseIdAndProductIdInOrderByIdAsc(WAREHOUSE_ID, List.of(1L));
+            verify(inventoryRepository, never()).findByWarehouseIdAndProductIdIn(anyLong(), anyCollection());
+        }
+
+        @Test
+        @DisplayName("the insufficient verdict is also taken against locked levels")
+        void shortfallDecisionIsLocked() {
+            Product milk = product(1L, "FF-GR-0002", "Carton 6 x Brik UHT 1L", "8.500");
+            givenOrder(List.of(new OrderLine(1L, 9)), milk);
+            givenStock(stock(milk, 1, 0));
+
+            reservationService.reserve(orderCreated());
+
+            verify(inventoryRepository).findByWarehouseIdAndProductIdInOrderByIdAsc(WAREHOUSE_ID, List.of(1L));
+            verify(eventPublisher).publish(eq(TOPIC_INSUFFICIENT), any(), any());
+        }
+    }
+
+    // -------------------------------------------------------------- dual write
+
+    @Nested
+    @DisplayName("publishing after the commit")
+    class AfterCommit {
+
+        @Test
+        @DisplayName("inventory.reserved stays off the bus until the transaction commits")
+        void reservedIsNotPublishedBeforeCommit() {
+            Product milk = product(1L, "FF-GR-0002", "Carton 6 x Brik UHT 1L", "8.500");
+            givenOrder(List.of(new OrderLine(1L, 3)), milk);
+            givenStock(stock(milk, 40, 0));
+            givenSavingReservations();
+
+            TransactionTemplate transaction = new TransactionTemplate(new CommitOnlyTransactionManager());
+            transaction.executeWithoutResult(status -> {
+                reservationService.reserve(orderCreated());
+
+                verify(eventPublisher, never()).publish(any(), any(), any());
+            });
+
+            verify(eventPublisher).publish(eq(TOPIC_RESERVED), eq(String.valueOf(ORDER_ID)), any());
+        }
+
+        @Test
+        @DisplayName("inventory.insufficient stays off the bus until the transaction commits")
+        void insufficientIsNotPublishedBeforeCommit() {
+            Product milk = product(1L, "FF-GR-0002", "Carton 6 x Brik UHT 1L", "8.500");
+            givenOrder(List.of(new OrderLine(1L, 9)), milk);
+            givenStock(stock(milk, 1, 0));
+
+            TransactionTemplate transaction = new TransactionTemplate(new CommitOnlyTransactionManager());
+            transaction.executeWithoutResult(status -> {
+                reservationService.reserve(orderCreated());
+
+                verify(eventPublisher, never()).publish(any(), any(), any());
+            });
+
+            verify(eventPublisher).publish(eq(TOPIC_INSUFFICIENT), eq(String.valueOf(ORDER_ID)), any());
+        }
+
+        @Test
+        @DisplayName("a bus outage after the commit is logged, not turned into a failed reservation")
+        void aPublishFailureDoesNotUndoTheCommittedReservation() {
+            org.mockito.Mockito.doThrow(new IllegalStateException("broker down"))
+                    .when(eventPublisher).publish(any(), any(), any());
+            Product milk = product(1L, "FF-GR-0002", "Carton 6 x Brik UHT 1L", "8.500");
+            Inventory milkStock = stock(milk, 40, 0);
+            givenOrder(List.of(new OrderLine(1L, 3)), milk);
+            givenStock(milkStock);
+            givenSavingReservations();
+
+            TransactionTemplate transaction = new TransactionTemplate(new CommitOnlyTransactionManager());
+            transaction.executeWithoutResult(status -> reservationService.reserve(orderCreated()));
+
+            assertEquals(37, milkStock.getAvailableQuantity(),
+                    "the stock really was taken, so the caller must not be told the reservation failed");
+            verify(eventPublisher).publish(eq(TOPIC_RESERVED), any(), any());
+        }
+    }
+
+    @Test
+    @DisplayName("an order with no lines is refused rather than silently reserving nothing")
+    void anOrderWithNoLinesIsRefused() {
+        when(reservationRepository.existsByOrderId(ORDER_ID)).thenReturn(false);
+        when(orderServiceClient.findItemLines(ORDER_ID)).thenReturn(List.of());
+
+        assertThrows(com.fleetflow.common.exception.BusinessException.class,
+                () -> reservationService.reserve(orderCreated()));
+        verify(eventPublisher, never()).publish(any(), any(), any());
+    }
+
     // ----------------------------------------------------------------- helpers
 
     private void givenSavingReservations() {
@@ -242,8 +385,13 @@ class InventoryReservationServiceTest {
     }
 
     private void givenStock(Inventory... rows) {
-        when(inventoryRepository.findByWarehouseIdAndProductIdIn(eq(WAREHOUSE_ID), any()))
+        when(inventoryRepository.findByWarehouseIdAndProductIdInOrderByIdAsc(eq(WAREHOUSE_ID), any()))
                 .thenReturn(List.of(rows));
+    }
+
+    private void givenNoStock() {
+        when(inventoryRepository.findByWarehouseIdAndProductIdInOrderByIdAsc(eq(WAREHOUSE_ID), any()))
+                .thenReturn(List.of());
     }
 
     @SuppressWarnings("unchecked")
@@ -297,5 +445,40 @@ class InventoryReservationServiceTest {
         inventory.setAvailableQuantity(available);
         inventory.setReservedQuantity(reserved);
         return inventory;
+    }
+
+    /**
+     * A transaction that begins and commits without a database, so the AFTER_COMMIT
+     * listener can be observed. That is the whole point: whether the event reaches the bus
+     * before or after the commit is decided by transaction synchronisation, not by mocks.
+     */
+    private static final class CommitOnlyTransactionManager extends AbstractPlatformTransactionManager {
+
+        private static final Object TRANSACTION = new Object();
+
+        @Override
+        protected Object doGetTransaction() {
+            return TRANSACTION;
+        }
+
+        @Override
+        protected boolean isExistingTransaction(Object transaction) {
+            return false;
+        }
+
+        @Override
+        protected void doBegin(Object transaction, TransactionDefinition definition) {
+            // nothing to acquire
+        }
+
+        @Override
+        protected void doCommit(DefaultTransactionStatus status) {
+            // nothing to flush
+        }
+
+        @Override
+        protected void doRollback(DefaultTransactionStatus status) {
+            // nothing to undo
+        }
     }
 }

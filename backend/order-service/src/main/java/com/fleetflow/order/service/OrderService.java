@@ -19,6 +19,7 @@ import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -26,10 +27,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.fleetflow.common.api.PageResponse;
 import com.fleetflow.common.correlation.CorrelationId;
-import com.fleetflow.common.event.DomainEventPublisher;
-import com.fleetflow.common.event.EventEnvelope;
 import com.fleetflow.common.event.EventTypes;
-import com.fleetflow.common.event.KafkaTopics;
 import com.fleetflow.common.event.payload.OrderCreatedPayload;
 import com.fleetflow.common.exception.BusinessException;
 import com.fleetflow.common.exception.ErrorCode;
@@ -39,6 +37,7 @@ import com.fleetflow.common.security.SecurityUtils;
 
 import com.fleetflow.order.client.ProductCatalogClient;
 import com.fleetflow.order.client.ProductCatalogClient.ProductSnapshot;
+import com.fleetflow.order.config.OrderTopicProperties;
 import com.fleetflow.order.config.PricingProperties;
 import com.fleetflow.order.dto.CancelOrderRequest;
 import com.fleetflow.order.dto.CreateOrderRequest;
@@ -52,6 +51,7 @@ import com.fleetflow.order.entity.OrderItem;
 import com.fleetflow.order.entity.OrderStatus;
 import com.fleetflow.order.entity.OrderStatusHistory;
 import com.fleetflow.order.entity.StatusSource;
+import com.fleetflow.order.kafka.OrderEventPublisher;
 import com.fleetflow.order.mapper.OrderMapper;
 import com.fleetflow.order.repository.OrderItemRepository;
 import com.fleetflow.order.repository.OrderRepository;
@@ -73,7 +73,8 @@ public class OrderService {
     private final OrderItemRepository orderItemRepository;
     private final OrderStatusHistoryRepository historyRepository;
     private final ProductCatalogClient productCatalogClient;
-    private final DomainEventPublisher eventPublisher;
+    private final ApplicationEventPublisher eventPublisher;
+    private final OrderTopicProperties topics;
     private final OrderSortResolver sortResolver;
     private final OrderMapper mapper;
     private final PricingProperties pricing;
@@ -82,7 +83,8 @@ public class OrderService {
             OrderItemRepository orderItemRepository,
             OrderStatusHistoryRepository historyRepository,
             ProductCatalogClient productCatalogClient,
-            DomainEventPublisher eventPublisher,
+            ApplicationEventPublisher eventPublisher,
+            OrderTopicProperties topics,
             OrderSortResolver sortResolver,
             OrderMapper mapper,
             PricingProperties pricing) {
@@ -92,6 +94,7 @@ public class OrderService {
         this.historyRepository = historyRepository;
         this.productCatalogClient = productCatalogClient;
         this.eventPublisher = eventPublisher;
+        this.topics = topics;
         this.sortResolver = sortResolver;
         this.mapper = mapper;
         this.pricing = pricing;
@@ -154,9 +157,12 @@ public class OrderService {
                 appendHistory(order, OrderStatus.CREATED, null, StatusSource.CUSTOMER, "Order placed"));
         int itemCount = order.totalQuantity();
 
-        eventPublisher.publish(KafkaTopics.ORDER_CREATED, String.valueOf(order.getId()),
-                EventEnvelope.of(EventTypes.ORDER_CREATED, KafkaTopics.ORDER_CREATED, new OrderCreatedPayload(
-                        order.getId(), customerId, order.getCity(), order.getPostalCode(), itemCount, totalAmount)));
+        // Recorded now, sent in OrderEventPublisher once the commit succeeds, so a rolled back
+        // checkout never announces an order the warehouse would then reserve stock for.
+        eventPublisher.publishEvent(new OrderEventPublisher.Intent(topics.getOrderCreated(), order.getId(),
+                EventTypes.ORDER_CREATED,
+                new OrderCreatedPayload(order.getId(), customerId, order.getCity(), order.getPostalCode(),
+                        itemCount, totalAmount)));
 
         log.info("Created order {} for customer {} with {} units, total {} {} [correlationId={}]",
                 order.getId(), customerId, itemCount, totalAmount, order.getCurrency(), CorrelationId.getOrCreate());
@@ -270,7 +276,7 @@ public class OrderService {
 
     @Transactional
     public OrderResponse cancel(Long orderId, CancelOrderRequest request) {
-        Order order = findOrder(orderId);
+        Order order = findOrderForUpdate(orderId);
         SecurityUtils.requireSelfOrStaff(order.getCustomerId());
 
         boolean staff = SecurityUtils.isStaff();
@@ -295,7 +301,7 @@ public class OrderService {
 
     @Transactional
     public OrderResponse updateStatus(Long orderId, UpdateOrderStatusRequest request) {
-        Order order = findOrder(orderId);
+        Order order = findOrderForUpdate(orderId);
         OrderStatus from = order.getStatus();
         OrderStatus target = request.status();
         if (!from.canTransitionTo(target)) {
@@ -332,10 +338,28 @@ public class OrderService {
                 .orElseThrow(() -> ResourceNotFoundException.of("Order", orderId));
     }
 
+    /**
+     * A status change reads the order, asks the machine whether the move is legal and
+     * writes the result, so the read has to hold the row until the write is done.
+     */
+    private Order findOrderForUpdate(Long orderId) {
+        return orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> ResourceNotFoundException.of("Order", orderId));
+    }
+
     /** For the event path, where an unknown id is a stale message rather than a client error. */
     @Transactional(readOnly = true)
     public Optional<Order> findOptionalOrder(Long orderId) {
         return orderRepository.findById(orderId);
+    }
+
+    /**
+     * Event driven transitions arrive on separate topics, so two of them can be handled
+     * concurrently for one order. Locking the row keeps the read-check-write of the
+     * status machine atomic across listeners as well as against the API.
+     */
+    public Optional<Order> findOptionalOrderForUpdate(Long orderId) {
+        return orderRepository.findByIdForUpdate(orderId);
     }
 
     @Transactional(readOnly = true)

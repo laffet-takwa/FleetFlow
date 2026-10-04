@@ -6,7 +6,6 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -51,7 +50,7 @@ public class VehicleService {
     public PageResponse<VehicleResponse> search(String status, String type, String search, int page, int size) {
         VehicleStatus parsedStatus = status == null || status.isBlank() ? null : VehicleStatus.from(status);
         VehicleType parsedType = type == null || type.isBlank() ? null : VehicleType.from(type);
-        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.ASC, "registrationNumber"));
+        Pageable pageable = PageBounds.of(page, size, Sort.by(Sort.Direction.ASC, "registrationNumber"));
         Page<Vehicle> result = vehicleRepository.search(parsedStatus, parsedType, blankToNull(search), pageable);
         return PageResponse.from(result, enrich(result.getContent()));
     }

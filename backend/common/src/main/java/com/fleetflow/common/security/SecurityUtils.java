@@ -1,5 +1,6 @@
 package com.fleetflow.common.security;
 
+import java.util.Objects;
 import java.util.Optional;
 
 import org.springframework.security.core.Authentication;
@@ -77,7 +78,9 @@ public final class SecurityUtils {
         if (principal.role() == FleetRole.ADMIN || principal.role() == FleetRole.OPERATIONS) {
             return;
         }
-        if (!ownerId.equals(principal.userId())) {
+        // Objects.equals, not ownerId.equals: a row whose owner link is somehow absent
+        // must fail the check as forbidden rather than escape as a 500 NullPointerException.
+        if (!Objects.equals(ownerId, principal.userId())) {
             throw new BusinessException(ErrorCode.FORBIDDEN, "You may only access your own resources");
         }
     }

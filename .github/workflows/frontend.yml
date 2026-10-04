@@ -45,6 +45,13 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      # The SPA's types are hand maintained, so nothing at compile time proves that a
+      # call still matches a real endpoint. This checks every call against the
+      # controllers and the gateway route table, and fails on a mismatch.
+      - name: Audit the SPA API contract against the controllers
+        working-directory: .
+        run: node scripts/audit-api.mjs
+
       - name: Lint
         run: npm run lint
 

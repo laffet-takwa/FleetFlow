@@ -98,7 +98,10 @@ public class InventoryService {
 
     @Transactional
     public InventoryResponse adjust(Long inventoryId, AdjustInventoryRequest request) {
-        Inventory inventory = inventoryRepository.findById(inventoryId)
+        // Locked read: a correction is read-modify-write, so without the row lock two
+        // concurrent corrections of the same level would both start from the old quantity
+        // and one increment would vanish without any constraint noticing.
+        Inventory inventory = inventoryRepository.findByIdForUpdate(inventoryId)
                 .orElseThrow(() -> ResourceNotFoundException.of("Inventory", inventoryId));
 
         int delta = request.quantityDelta();

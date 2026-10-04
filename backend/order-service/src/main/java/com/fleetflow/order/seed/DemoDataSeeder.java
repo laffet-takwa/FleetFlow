@@ -221,7 +221,7 @@ public class DemoDataSeeder implements ApplicationRunner {
     }
 
     /** A cancelled order is cancelled from a state the machine can actually reach. */
-    private static List<OrderStatus> historyChain(OrderStatus target) {
+    static List<OrderStatus> historyChain(OrderStatus target) {
         List<OrderStatus> chain = new ArrayList<>();
         chain.add(OrderStatus.CREATED);
         if (target == OrderStatus.CANCELLED) {
@@ -229,7 +229,10 @@ public class DemoDataSeeder implements ApplicationRunner {
             chain.add(OrderStatus.CANCELLED);
             return chain;
         }
-        if (target == OrderStatus.CONFIRMED) {
+        // CREATED has already reached its final state on the opening row. Without this it
+        // falls through to the DELIVERED chain below, and the timeline would claim the
+        // order was delivered while the order row still says CREATED.
+        if (target == OrderStatus.CREATED || target == OrderStatus.CONFIRMED) {
             return chain;
         }
         chain.add(OrderStatus.CONFIRMED);

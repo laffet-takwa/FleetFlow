@@ -11,12 +11,11 @@ import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.fleetflow.common.correlation.CorrelationId;
-import com.fleetflow.common.event.DomainEventPublisher;
-import com.fleetflow.common.event.EventEnvelope;
 import com.fleetflow.common.event.EventTypes;
 import com.fleetflow.common.event.payload.InventoryInsufficientPayload;
 import com.fleetflow.common.event.payload.InventoryInsufficientPayload.Shortfall;
@@ -33,6 +32,7 @@ import com.fleetflow.warehouse.entity.Inventory;
 import com.fleetflow.warehouse.entity.InventoryReservation;
 import com.fleetflow.warehouse.entity.Product;
 import com.fleetflow.warehouse.entity.Warehouse;
+import com.fleetflow.warehouse.kafka.InventoryEventPublisher;
 import com.fleetflow.warehouse.repository.InventoryRepository;
 import com.fleetflow.warehouse.repository.InventoryReservationRepository;
 import com.fleetflow.warehouse.repository.ProductRepository;
@@ -51,7 +51,7 @@ public class InventoryReservationService {
     private final WarehouseService warehouseService;
     private final ReservationProperties reservationProperties;
     private final KafkaTopicProperties topics;
-    private final DomainEventPublisher eventPublisher;
+    private final ApplicationEventPublisher eventPublisher;
 
     public InventoryReservationService(ProductRepository productRepository,
             InventoryRepository inventoryRepository,
@@ -104,7 +104,7 @@ public class InventoryReservationService {
                 .map(LinePlan::shortfall)
                 .toList();
         if (!shortfalls.isEmpty()) {
-            publish(topics.getInventoryInsufficient(), orderId, EventTypes.INVENTORY_INSUFFICIENT,
+            defer(topics.getInventoryInsufficient(), orderId, EventTypes.INVENTORY_INSUFFICIENT,
                     new InventoryInsufficientPayload(orderId, customerId, shortfalls));
             log.warn("Order {} cannot be reserved, {} of {} lines short [correlationId={}]", orderId,
                     shortfalls.size(), plans.size(), CorrelationId.getOrCreate());
@@ -123,7 +123,7 @@ public class InventoryReservationService {
             itemCount += plan.quantity();
         }
 
-        publish(topics.getInventoryReserved(), orderId, EventTypes.INVENTORY_RESERVED,
+        defer(topics.getInventoryReserved(), orderId, EventTypes.INVENTORY_RESERVED,
                 new InventoryReservedPayload(orderId, customerId, warehouse.getId(), warehouse.getName(),
                         reservedValue.setScale(MONEY_SCALE, RoundingMode.HALF_UP), itemCount));
         log.info("Reserved {} units across {} lines for order {} from warehouse {} [correlationId={}]", itemCount,
@@ -134,7 +134,9 @@ public class InventoryReservationService {
 
     /**
      * Loads everything the decision needs without touching a single quantity, so the
-     * caller can inspect the whole picture before committing to it.
+     * caller can inspect the whole picture before committing to it. The stock rows are
+     * read {@code FOR UPDATE} so the availability decided on here is still the
+     * availability that is written, even under a concurrent reservation.
      */
     private List<LinePlan> plan(Long orderId, List<OrderLine> lines, Warehouse warehouse) {
         List<Long> productIds = new ArrayList<>(new LinkedHashSet<>(
@@ -142,7 +144,7 @@ public class InventoryReservationService {
         Map<Long, Product> products = productRepository.findAllById(productIds).stream()
                 .collect(Collectors.toMap(Product::getId, Function.identity()));
         Map<Long, Inventory> stock = inventoryRepository
-                .findByWarehouseIdAndProductIdIn(warehouse.getId(), productIds).stream()
+                .findByWarehouseIdAndProductIdInOrderByIdAsc(warehouse.getId(), productIds).stream()
                 .collect(Collectors.toMap(
                         inventory -> inventory.getProduct().getId(),
                         Function.identity(),
@@ -182,13 +184,12 @@ public class InventoryReservationService {
     }
 
     /**
-     * Published under the order id as the key so every event for one order lands on the
-     * same partition and subscribers cannot see {@code insufficient} before the
-     * {@code order.created} that caused it.
+     * Records the decision to publish under the order id as the key, so every event for
+     * one order lands on the same partition and subscribers cannot see
+     * {@code insufficient} before the {@code order.created} that caused it. The send
+     * itself happens in {@link InventoryEventPublisher}, after the commit.
      */
-    private <T> void publish(String topic, Long orderId, String eventType, T payload) {
-        eventPublisher.publish(topic, String.valueOf(orderId), EventEnvelope.of(eventType, topic, payload));
-        log.info("Published {} for order {} to {} [correlationId={}]", eventType, orderId, topic,
-                CorrelationId.getOrCreate());
+    private void defer(String topic, Long orderId, String eventType, Object payload) {
+        eventPublisher.publishEvent(new InventoryEventPublisher.Intent(topic, orderId, eventType, payload));
     }
 }

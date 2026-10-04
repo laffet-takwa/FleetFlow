@@ -96,14 +96,23 @@ public class TrackingQueryService {
     /**
      * Everything currently on the move, with pins resolved in one Redis round trip rather
      * than one call per row.
+     *
+     * <p>Staff see the whole fleet, which is what the operations map needs. Everybody else
+     * sees only their own rows: the endpoint used to hand every authenticated caller every
+     * tracked delivery, including another customer's live position, driver name and
+     * drop-off address.
      */
     public List<TrackedDeliveryResponse> active() {
+        JwtPrincipal principal = SecurityUtils.requirePrincipal();
         List<DeliveryTrackingState> states = mongoTemplate.find(
                 Query.query(Criteria.where("trackingEnabled").is(true)).with(Sort.by("deliveryId")),
                 DeliveryTrackingState.class);
+        List<DeliveryTrackingState> visible = states.stream()
+                .filter(state -> mayView(principal, state))
+                .toList();
         Map<Long, LocationResponse> locations = latestLocationStore.findAllFor(
-                states.stream().map(DeliveryTrackingState::getDeliveryId).toList());
-        return states.stream().map(state -> toTrackedDelivery(state, locations.get(state.getDeliveryId()))).toList();
+                visible.stream().map(DeliveryTrackingState::getDeliveryId).toList());
+        return visible.stream().map(state -> toTrackedDelivery(state, locations.get(state.getDeliveryId()))).toList();
     }
 
     /**
@@ -135,16 +144,26 @@ public class TrackingQueryService {
      */
     void requireViewer(DeliveryTrackingState state) {
         JwtPrincipal principal = SecurityUtils.requirePrincipal();
+        if (!mayView(principal, state)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "You may only track your own deliveries");
+        }
+    }
+
+    private boolean mayView(JwtPrincipal principal, DeliveryTrackingState state) {
         if (principal.role() == FleetRole.ADMIN || principal.role() == FleetRole.OPERATIONS) {
-            return;
+            return true;
         }
-        if (Objects.equals(principal.userId(), state.getCustomerId())) {
-            return;
+        // A missing id on either side matches nobody. Objects.equals(null, null) is true,
+        // so an unassigned or malformed state would otherwise be readable by a caller that
+        // has no identity at all.
+        Long callerId = principal.userId();
+        if (callerId == null) {
+            return false;
         }
-        if (state.getDriverUserId() != null && Objects.equals(principal.userId(), state.getDriverUserId())) {
-            return;
+        if (Objects.equals(callerId, state.getCustomerId())) {
+            return true;
         }
-        throw new BusinessException(ErrorCode.FORBIDDEN, "You may only track your own deliveries");
+        return callerId.equals(state.getDriverUserId());
     }
 
     private TrackedDeliveryResponse toTrackedDelivery(DeliveryTrackingState state, LocationResponse latest) {

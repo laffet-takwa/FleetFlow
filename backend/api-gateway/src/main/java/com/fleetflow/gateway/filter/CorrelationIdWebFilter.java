@@ -16,10 +16,13 @@ import reactor.core.publisher.Mono;
 /**
  * Establishes the {@code X-Correlation-ID} for every request that crosses the gateway.
  *
- * <p>An id supplied by the caller is honoured, otherwise one is generated. The value is
- * written back on the response and attached to the forwarded request, so the same id
- * appears in the gateway access log, in each downstream service, and in every Kafka
- * event produced while handling the request.
+ * <p>An id supplied by the caller is honoured when it is safe to echo, otherwise one is
+ * generated: the value reaches a response header, JSON error bodies assembled by string
+ * concatenation, and the access log, so it is restricted to identifier characters by
+ * {@link CorrelationId#resolveOrCreate}. The value is written back on the response and
+ * attached to the forwarded request, so the same id appears in the gateway access log,
+ * in each downstream service, and in every Kafka event produced while handling the
+ * request.
  *
  * <p>This is a {@link WebFilter} rather than a {@code GlobalFilter} on purpose. Spring
  * Cloud Gateway runs its {@code WebFilter} chain (CORS, security) before the global
@@ -47,10 +50,7 @@ public class CorrelationIdWebFilter implements WebFilter, Ordered {
     }
 
     private String resolve(String candidate) {
-        if (candidate == null || candidate.isBlank() || candidate.length() > 128) {
-            return CorrelationId.newId();
-        }
-        return candidate;
+        return CorrelationId.resolveOrCreate(candidate);
     }
 
     @Override

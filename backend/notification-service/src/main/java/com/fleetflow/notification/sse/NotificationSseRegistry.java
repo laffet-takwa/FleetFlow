@@ -55,7 +55,7 @@ public class NotificationSseRegistry {
      * event, which is what lets the client distinguish "subscribed" from "hanging".
      */
     public SseEmitter subscribe(long userId) {
-        SseEmitter emitter = new SseEmitter(STREAM_TIMEOUT_MILLIS);
+        SseEmitter emitter = newEmitter();
         emitter.onCompletion(() -> remove(userId, emitter));
         emitter.onTimeout(() -> {
             remove(userId, emitter);
@@ -83,9 +83,20 @@ public class NotificationSseRegistry {
         broadcast(userId, EVENT_UNREAD_COUNT, new UnreadCountPayload(count));
     }
 
-    /** Tells every stream of the user that the badge is now empty, without sending the rows. */
-    public void pushReadAll(long userId) {
-        broadcast(userId, EVENT_READ_ALL, new UnreadCountPayload(0L));
+    /**
+     * Tells every stream of the user that its badge has been cleared, carrying the count
+     * the server actually holds rather than a fixed zero.
+     */
+    public void pushReadAll(long userId, long remainingUnread) {
+        broadcast(userId, EVENT_READ_ALL, new UnreadCountPayload(remainingUnread));
+    }
+
+    /**
+     * Overridable so a test can drive the emitter lifecycle that a servlet container
+     * normally drives; production always uses the recycling stream above.
+     */
+    SseEmitter newEmitter() {
+        return new SseEmitter(STREAM_TIMEOUT_MILLIS);
     }
 
     private void broadcast(long userId, String event, Object payload) {
@@ -100,8 +111,12 @@ public class NotificationSseRegistry {
             emitter.send(SseEmitter.event().name(event).data(json, MediaType.APPLICATION_JSON));
         } catch (IOException | IllegalStateException ex) {
             // The tab was closed mid-send; dropping the emitter is the only way out,
-            // otherwise every later notification would retry a dead connection.
+            // otherwise every later notification would retry a dead connection. Completing
+            // it as well releases the async request now: an emitter that is only removed
+            // from this map has no path left that ends the request, so the container would
+            // hold its thread until the stream timeout fires.
             remove(userId, emitter);
+            emitter.complete();
             log.debug("Dropped SSE stream of userId={}: {}", userId, ex.getMessage());
         }
     }
